@@ -1,0 +1,180 @@
+"""Application configuration loaded from environment variables.
+
+Uses Pydantic ``BaseSettings`` (v2) to read and validate ``.env``.
+
+Usage
+-----
+    from src.config import get_settings
+
+    settings = get_settings()
+    print(settings.llm_provider)
+
+Testing
+-------
+    from src.config import get_settings, clear_settings_cache
+
+    clear_settings_cache()  # force re-read on next ``get_settings()``
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from typing import Final
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# ---------------------------------------------------------------------------
+# Allowed values
+# ---------------------------------------------------------------------------
+VALID_PROVIDERS: Final[frozenset[str]] = frozenset({"groq", "ollama"})
+VALID_EMBEDDING_PROVIDERS: Final[frozenset[str]] = frozenset({"ollama"})
+VALID_LOG_LEVELS: Final[frozenset[str]] = frozenset(
+    {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+)
+
+
+# ---------------------------------------------------------------------------
+# Settings model
+# ---------------------------------------------------------------------------
+class Settings(BaseSettings):
+    """Application settings loaded from environment variables / ``.env``.
+
+    Only **shared** settings are validated here.  Provider-specific
+    credentials (e.g. ``GROQ_API_KEY``) are validated at provider
+    construction time so the application can start even when one provider
+    is not configured.
+    """
+
+    # ── Provider selection ────────────────────────────────────────────
+    llm_provider: str = "groq"
+
+    # ── Groq (optional — validated when selected) ─────────────────────
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.1-70b-versatile"
+
+    # ── Document processing ──────────────────────────────────────────
+    chunk_size: int = 1024
+    chunk_overlap: int = 128
+
+    # ── Embedding provider ────────────────────────────────────────────
+    embedding_provider: str = "ollama"
+    embedding_model: str = "nomic-embed-text"
+
+    # ── Qdrant (optional — validated when selected) ───────────────────
+    qdrant_host: str = "localhost"
+    qdrant_port: int = 6333
+    qdrant_collection: str = "documents"
+
+    # ── Ollama (optional — validated when selected) ───────────────────
+    ollama_host: str = "http://localhost:11434"
+    ollama_model: str = "llama3.1:8b"
+
+    # ── Defaults (overridable at runtime via sidebar) ─────────────────
+    default_system_prompt: str = (
+        "You are a helpful, respectful and honest assistant. "
+        "Answer concisely and accurately."
+    )
+    temperature: float = 0.7
+    max_tokens: int = 2048
+
+    # ── Networking ────────────────────────────────────────────────────
+    request_timeout: int = 30
+
+    # ── Observability ─────────────────────────────────────────────────
+    log_level: str = "INFO"
+
+    # ── Pydantic model configuration ──────────────────────────────────
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    # ── Validators ────────────────────────────────────────────────────
+
+    @field_validator("llm_provider")
+    @classmethod
+    def _normalise_provider(cls, v: str) -> str:
+        stripped = v.strip().lower()
+        if stripped not in VALID_PROVIDERS:
+            raise ValueError(
+                f"Invalid LLM_PROVIDER {v!r}. Must be one of: {', '.join(sorted(VALID_PROVIDERS))}."
+            )
+        return stripped
+
+    @field_validator("embedding_provider")
+    @classmethod
+    def _normalise_embedding_provider(cls, v: str) -> str:
+        stripped = v.strip().lower()
+        if stripped not in VALID_EMBEDDING_PROVIDERS:
+            raise ValueError(
+                f"Invalid EMBEDDING_PROVIDER {v!r}. Must be one of: {', '.join(sorted(VALID_EMBEDDING_PROVIDERS))}."
+            )
+        return stripped
+
+    @field_validator("groq_model", "ollama_model", "embedding_model")
+    @classmethod
+    def _strip_model_name(cls, v: str) -> str:
+        return v.strip()
+
+    @field_validator("ollama_host")
+    @classmethod
+    def _validate_ollama_host(cls, v: str) -> str:
+        stripped = v.strip().rstrip("/")
+        if not stripped.startswith(("http://", "https://")):
+            raise ValueError(
+                f"OLLAMA_HOST must start with http:// or https://, got {v!r}"
+            )
+        return stripped
+
+    @field_validator("temperature")
+    @classmethod
+    def _validate_temperature(cls, v: float) -> float:
+        if v < 0.0 or v > 2.0:
+            raise ValueError(f"TEMPERATURE must be between 0.0 and 2.0, got {v}")
+        return v
+
+    @field_validator("max_tokens")
+    @classmethod
+    def _validate_max_tokens(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"MAX_TOKENS must be a positive integer, got {v}")
+        return v
+
+    @field_validator("request_timeout")
+    @classmethod
+    def _validate_request_timeout(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(
+                f"REQUEST_TIMEOUT must be a positive integer (seconds), got {v}"
+            )
+        return v
+
+    @field_validator("log_level")
+    @classmethod
+    def _validate_log_level(cls, v: str) -> str:
+        upper = v.strip().upper()
+        if upper not in VALID_LOG_LEVELS:
+            raise ValueError(
+                f"LOG_LEVEL must be one of {', '.join(sorted(VALID_LOG_LEVELS))}, got {v!r}"
+            )
+        return upper
+
+
+# ---------------------------------------------------------------------------
+# Cached accessor (usable from tests)
+# ---------------------------------------------------------------------------
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Return a cached ``Settings`` instance (singleton per interpreter).
+
+    Use ``clear_settings_cache()`` in tests to force a re-read.
+    """
+    return Settings()
+
+
+def clear_settings_cache() -> None:
+    """Clear the cached settings so the next ``get_settings()`` re-reads ``.env``."""
+    get_settings.cache_clear()

@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "llama-chatbot"
+version = "0.1.0"
+description = "A production-ready Streamlit chatbot powered by Llama 3.1 via Groq or Ollama."
+requires-python = ">=3.11"
+readme = "README.md"
+
+# ── Ruff Configuration ──────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "F",   # pyflakes errors
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "S",   # bandit (security)
+    "C4",  # comprehension
+    "SIM", # simplify
+    "ARG", # unused arguments
+]
+
+ignore = ["E501"]  # line-length handled by formatter
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "SIM117"]    # Allow assert + nested with in pytest tests
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+
+# ── Pytest Configuration ────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "-p no:cacheprovider",
+]
+
+markers = [
+    "unit: marks tests as unit tests (default)",
+    "integration: marks tests as integration tests (use with caution — real API calls)",
+]

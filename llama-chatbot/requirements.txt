@@ -1,0 +1,38 @@
+# =============================================================================
+# llama-chatbot — Production Dependencies
+# =============================================================================
+# Pinned with compatible version ranges. Exact pins (==) are used where
+# reproducibility matters most; otherwise safe upper bounds are set.
+#
+# NOTE: These versions are known-compatible ranges for Python 3.11+.
+# If you are unsure about the latest available versions, run:
+#   pip install <package>  # then check `pip freeze` for exact numbers.
+# =============================================================================
+
+# ── Runtime ──────────────────────────────────────────────────────────────────
+
+# Web UI framework
+streamlit>=1.35.0,<2.0.0
+
+# Groq cloud inference SDK
+groq>=0.10.0,<1.0.0
+
+# Ollama local inference SDK
+ollama>=0.3.0,<1.0.0
+
+# Environment variable loading from .env files
+python-dotenv>=1.0.0,<2.0.0
+
+# Data validation & settings management (Pydantic v2)
+pydantic>=2.0.0,<3.0.0
+pydantic-settings>=2.0.0,<3.0.0
+
+# ── Development ──────────────────────────────────────────────────────────────
+
+# Testing framework
+pytest>=8.0,<9.0
+pytest-mock>=3.14,<4.0
+
+# Linter & formatter
+ruff>=0.6.0,<1.0.0
+
