@@ -428,3 +428,103 @@ class TestNoMutableDefaults:
         params = list(sig.parameters.keys())
         assert "conversation" in params
         assert sig.parameters["conversation"].default is inspect.Parameter.empty
+
+
+# ======================================================================
+# RAG Integration Tests
+# ======================================================================
+
+class TestRAGServiceCreation:
+    """Verify ChatService correctly accepts RAGService."""
+
+    def test_rag_service_defaults_to_none(self) -> None:
+        """When rag_service is not provided, it should be None."""
+        service = _make_service()
+        assert service.rag_service is None
+
+    def test_rag_service_property(self) -> None:
+        """The rag_service property should return the injected instance."""
+        provider = _make_mock_provider()
+        rag_service = MagicMock()
+        service = ChatService(
+            provider=provider,
+            model="test-model",
+            rag_service=rag_service,
+        )
+        assert service.rag_service is rag_service
+
+    def test_rag_service_is_optional(self) -> None:
+        """Creating ChatService without rag_service should work."""
+        service = _make_service()
+        assert service is not None
+        assert service.rag_service is None
+
+
+class TestRAGSendMessage:
+    """RAG integration in send_message."""
+
+    def test_rag_service_called_when_provided(self) -> None:
+        """When RAGService is provided, it should be called."""
+        provider = _make_mock_provider(chunks=["Answer"])
+        rag_service = MagicMock()
+        rag_service.query.return_value.query = "test query"
+        rag_service.query.return_value.context = "Relevant document context."
+        rag_service.query.return_value.retrieval_result = MagicMock()
+
+        service = ChatService(
+            provider=provider,
+            model="test-model",
+            rag_service=rag_service,
+        )
+        conversation = Conversation()
+        service.send_message(conversation, "test query")
+
+        rag_service.query.assert_called_once_with("test query")
+
+    def test_rag_context_prepended_to_user_message(self) -> None:
+        """When RAGService returns context, it should be prepended to the
+        user message."""
+        provider = _make_mock_provider(chunks=["Answer"])
+        rag_service = MagicMock()
+        rag_service.query.return_value.query = "test query"
+        rag_service.query.return_value.context = "Document context."
+        rag_service.query.return_value.retrieval_result = MagicMock()
+
+        service = ChatService(
+            provider=provider,
+            model="test-model",
+            rag_service=rag_service,
+        )
+        conversation = Conversation()
+        service.send_message(conversation, "test query")
+
+        user_msg = conversation.messages[0]
+        assert "Relevant context:" in user_msg.content
+        assert "Document context." in user_msg.content
+        assert "Question:" in user_msg.content
+        assert "test query" in user_msg.content
+
+    def test_rag_not_used_when_not_provided(self) -> None:
+        """Without RAGService, the user message should remain unchanged."""
+        provider = _make_mock_provider(chunks=["Answer"])
+        service = _make_service(provider)
+        conversation = Conversation()
+        service.send_message(conversation, "Hello")
+
+        user_msg = conversation.messages[0]
+        assert user_msg.content == "Hello"
+
+    def test_rag_failure_falls_back_quietly(self) -> None:
+        """When RAG query fails, the original message should be used."""
+        provider = _make_mock_provider(chunks=["Answer"])
+        rag_service = MagicMock()
+        rag_service.query.side_effect = ChatbotError("RAG failed")
+
+        service = ChatService(
+            provider=provider,
+            model="test-model",
+            rag_service=rag_service,
+        )
+        conversation = Conversation()
+        service.send_message(conversation, "test query")
+

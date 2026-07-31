@@ -137,6 +137,61 @@ class BaseVectorStore(ABC):
             If the vector database returns an unexpected response.
         """
 
+    @abstractmethod
+    def scroll(
+        self,
+        limit: int = 100,
+        filter_dict: dict | None = None,
+    ) -> list[dict]:
+        """Scroll through points in the collection with an optional filter.
+
+        Parameters
+        ----------
+        limit:
+            Maximum number of points to return.
+        filter_dict:
+            Optional payload filter to narrow results.
+
+        Returns
+        -------
+        list[dict]
+            A list of point dicts, each containing ``id``, ``payload``,
+            and optionally ``vector``.
+
+        Raises
+        ------
+        ProviderConnectionError
+            If the vector database cannot be reached.
+        ProviderResponseError
+            If the vector database returns an unexpected response.
+        """
+
+    @abstractmethod
+    def delete_by_document_id(self, document_id: str) -> int:
+        """Delete all points belonging to a document.
+
+        Uses a payload filter on ``document_id`` to find and remove
+        all chunks associated with the document.
+
+        Parameters
+        ----------
+        document_id:
+            The unique identifier of the document whose points should
+            be deleted.
+
+        Returns
+        -------
+        int
+            The number of points deleted.
+
+        Raises
+        ------
+        ProviderConnectionError
+            If the vector database cannot be reached.
+        ProviderResponseError
+            If the vector database returns an unexpected response.
+        """
+
     # ------------------------------------------------------------------
     # Configuration validation
     # ------------------------------------------------------------------

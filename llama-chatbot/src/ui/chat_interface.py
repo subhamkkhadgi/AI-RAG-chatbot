@@ -12,6 +12,7 @@ import logging
 import streamlit as st
 
 from src.config import get_settings
+from src.embeddings.factory import create_embedding_provider
 from src.exceptions import (
     ChatbotError,
     ConfigurationError,
@@ -20,7 +21,11 @@ from src.exceptions import (
 )
 from src.models.chat import Conversation
 from src.providers.factory import create_provider
+from src.rag.context_builder import ContextBuilder
+from src.rag.rag_service import RAGService
+from src.retrieval.retriever import DocumentRetriever
 from src.services.chat_service import ChatService
+from src.vectorstores.factory import create_vector_store
 
 # Import sidebar session-state keys for consistency
 from src.ui.sidebar import (
@@ -86,12 +91,25 @@ def render_chat_interface() -> None:
 # Helpers
 # ---------------------------------------------------------------------------
 def _display_chat_history() -> None:
-    """Render all messages from the conversation using ``st.chat_message``."""
+    """Render all messages from the conversation using ``st.chat_message``.
+
+    The enriched RAG context (``Relevant context: ...``) is stripped from
+    user messages for display purposes only — the conversation history
+    stored in session state is not modified, and the LLM continues to
+    receive the full enriched context.
+    """
     conversation: Conversation = st.session_state.get(CONVERSATION_KEY, Conversation())
 
     for msg in conversation.messages:
         with st.chat_message(msg.role.value):
-            st.markdown(msg.content)
+            display_content = msg.content
+            # Strip RAG context from user messages for display only
+            if msg.role.value == "user" and "Relevant context:\n" in display_content:
+                # Extract only the original question after "...\n\nQuestion:\n"
+                parts = display_content.split("\n\nQuestion:\n", 1)
+                if len(parts) == 2:
+                    display_content = parts[1]
+            st.markdown(display_content)
 
 
 def _build_chat_service() -> ChatService:
@@ -107,12 +125,33 @@ def _build_chat_service() -> ChatService:
 
     provider = create_provider(provider_name, settings)
 
+    # Build RAG service using the same embedding provider and vector store
+    # used for document ingestion.
+    try:
+        embedding_provider = create_embedding_provider(
+            settings.embedding_provider, settings
+        )
+        vector_store = create_vector_store("qdrant", settings)
+        retriever = DocumentRetriever(
+            embedding_provider=embedding_provider,
+            vector_store=vector_store,
+        )
+        context_builder = ContextBuilder()
+        rag_service = RAGService(
+            retriever=retriever,
+            context_builder=context_builder,
+        )
+    except ChatbotError:
+        logger.warning("Failed to create RAGService, continuing without RAG")
+        rag_service = None
+
     return ChatService(
         provider=provider,
         model=model,
         system_prompt=system_prompt,
         temperature=temperature,
         max_tokens=max_tokens,
+        rag_service=rag_service,
     )
 
 
@@ -136,7 +175,7 @@ def _handle_user_message(
         # Stream chunks into the placeholder
         for chunk in chat_service.stream_message(conversation, content):
             assistant_content += chunk
-            response_placeholder.markdown(assistant_content + "▌")
+            response_placeholder.markdown(assistant_content + "\u258c")
 
     except ConfigurationError as exc:
         st.error(exc.safe_message)

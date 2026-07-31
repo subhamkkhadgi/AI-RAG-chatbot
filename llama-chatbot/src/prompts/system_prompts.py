@@ -24,7 +24,13 @@ _DEFAULT_SYSTEM_PROMPT: Final[str] = (
     "You are a helpful, respectful, and honest assistant. "
     "Answer concisely and accurately. If you do not know the answer "
     "to a question, state that you do not know rather than "
-    "making up information."
+    "making up information.\n\n"
+    "When relevant context is provided:\n"
+    "- Answer only the user's question based on the provided context.\n"
+    "- Do not include unrelated information from the retrieved context.\n"
+    "- Do not mention \"Relevant context\", documents, filenames, page numbers, "
+    "or any retrieval details unless explicitly asked about them.\n"
+    "- Keep answers concise when the question requires a short answer."
 )
 
 # ---------------------------------------------------------------------------

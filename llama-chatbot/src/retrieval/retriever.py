@@ -32,14 +32,14 @@ class DocumentRetriever:
         A vector store that implements ``BaseVectorStore``.
     default_limit:
         Default number of results to return when ``limit`` is not
-        specified (default 10).
+        specified (default 3).
     """
 
     def __init__(
         self,
         embedding_provider: BaseEmbeddingProvider,
         vector_store: BaseVectorStore,
-        default_limit: int = 10,
+        default_limit: int = 3,
     ) -> None:
         self._embedding_provider = embedding_provider
         self._vector_store = vector_store

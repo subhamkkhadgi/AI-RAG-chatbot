@@ -273,7 +273,9 @@ class TestSearch:
         mock_point2.score = 0.87
         mock_point2.payload = {"text": "result 2"}
 
-        mock_client.search.return_value = [mock_point1, mock_point2]
+        mock_response = MagicMock()
+        mock_response.points = [mock_point1, mock_point2]
+        mock_client.query_points.return_value = mock_response
 
         with patch.object(store, "_get_client", return_value=mock_client):
             results = store.search(vector=[0.1, 0.2], limit=2)
@@ -284,9 +286,9 @@ class TestSearch:
         assert results[0]["payload"] == {"text": "result 1"}
         assert results[1]["id"] == "def-456"
 
-        mock_client.search.assert_called_once_with(
+        mock_client.query_points.assert_called_once_with(
             collection_name="documents",
-            query_vector=[0.1, 0.2],
+            query=[0.1, 0.2],
             limit=2,
         )
 
@@ -294,7 +296,7 @@ class TestSearch:
         """search should translate errors to ProviderResponseError."""
         store = QdrantVectorStore(mock_settings)
         mock_client = MagicMock()
-        mock_client.search.side_effect = RuntimeError("search failed")
+        mock_client.query_points.side_effect = RuntimeError("search failed")
 
         with (
             patch.object(store, "_get_client", return_value=mock_client),

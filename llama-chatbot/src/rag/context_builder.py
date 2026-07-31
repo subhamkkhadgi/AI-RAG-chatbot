@@ -54,6 +54,11 @@ class ContextBuilder:
     def build(self, result: RetrievalResult) -> str:
         """Format retrieved chunks into a single context string.
 
+        Duplicate chunks (identical text content) are filtered out —
+        only the first occurrence of each unique text is kept. This
+        prevents redundant context from being passed to the LLM while
+        preserving metadata and scoring behavior.
+
         Parameters
         ----------
         result:
@@ -68,10 +73,18 @@ class ContextBuilder:
         if not result.chunks:
             return ""
 
+        # Filter duplicate chunks by text content (keep first occurrence)
+        seen_texts: set[str] = set()
+        deduped_chunks: list = []
+        for chunk in result.chunks:
+            if chunk.text not in seen_texts:
+                seen_texts.add(chunk.text)
+                deduped_chunks.append(chunk)
+
         parts: list[str] = []
         running_length = 0
 
-        for i, chunk in enumerate(result.chunks):
+        for i, chunk in enumerate(deduped_chunks):
             formatted = self._format_chunk(chunk, is_first=(i == 0))
 
             candidate_length = running_length + len(formatted)

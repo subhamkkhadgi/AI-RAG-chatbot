@@ -207,11 +207,12 @@ class QdrantVectorStore(BaseVectorStore):
         client = self._get_client()
 
         try:
-            results = client.search(
+            response = client.query_points(
                 collection_name=self._collection,
-                query_vector=vector,
+                query=vector,
                 limit=limit,
             )
+            results = response.points
         except Exception as exc:
             logger.error("Qdrant search error: %s", exc)
             raise ProviderResponseError(
@@ -247,6 +248,133 @@ class QdrantVectorStore(BaseVectorStore):
             )
         except Exception as exc:
             logger.error("Qdrant delete error: %s", exc)
+            raise ProviderResponseError(
+                self.provider_name,
+                safe_message=f"Failed to delete document '{document_id}' from Qdrant. Check the logs for details.",
+            ) from exc
+
+    def scroll(
+        self,
+        limit: int = 100,
+        filter_dict: dict | None = None,
+    ) -> list[dict]:
+        """Scroll through points in the collection with an optional filter.
+
+        Parameters
+        ----------
+        limit:
+            Maximum number of points to return.
+        filter_dict:
+            Optional payload filter to narrow results.
+
+        Returns
+        -------
+        list[dict]
+            A list of point dicts, each containing ``id``, ``payload``,
+            and optionally ``vector``.
+        """
+        client = self._get_client()
+
+        try:
+            qdrant_filter = None
+            if filter_dict:
+                conditions = [
+                    qdrant_models.FieldCondition(
+                        key=key,
+                        match=qdrant_models.MatchValue(value=value),
+                    )
+                    for key, value in filter_dict.items()
+                ]
+                qdrant_filter = qdrant_models.Filter(must=conditions)
+
+            records, _ = client.scroll(
+                collection_name=self._collection,
+                limit=limit,
+                with_payload=True,
+                with_vectors=False,
+                scroll_filter=qdrant_filter,
+            )
+
+            return [
+                {
+                    "id": str(record.id),
+                    "payload": record.payload or {},
+                }
+                for record in records
+            ]
+        except Exception as exc:
+            logger.error("Qdrant scroll error: %s", exc)
+            raise ProviderResponseError(
+                self.provider_name,
+                safe_message="Failed to scroll points in Qdrant. Check the logs for details.",
+            ) from exc
+
+    def delete_by_document_id(self, document_id: str) -> int:
+        """Delete all points belonging to a document.
+
+        Uses a payload filter on ``document_id`` to find and remove
+        all chunks associated with the document.
+
+        Parameters
+        ----------
+        document_id:
+            The unique identifier of the document whose points should
+            be deleted.
+
+        Returns
+        -------
+        int
+            The number of points deleted.
+        """
+        client = self._get_client()
+
+        try:
+            # First, scroll to count and collect point IDs
+            records, _ = client.scroll(
+                collection_name=self._collection,
+                limit=9999,
+                with_payload=False,
+                with_vectors=False,
+                scroll_filter=qdrant_models.Filter(
+                    must=[
+                        qdrant_models.FieldCondition(
+                            key="document_id",
+                            match=qdrant_models.MatchValue(value=document_id),
+                        ),
+                    ],
+                ),
+            )
+
+            if not records:
+                logger.info(
+                    "No points found for document_id='%s' — nothing to delete.",
+                    document_id,
+                )
+                return 0
+
+            point_ids = [record.id for record in records]
+
+            client.delete(
+                collection_name=self._collection,
+                points_selector=qdrant_models.PointIdsList(
+                    points=point_ids,
+                ),
+            )
+
+            deleted_count = len(point_ids)
+            logger.info(
+                "Deleted %d point(s) for document_id='%s'",
+                deleted_count,
+                document_id,
+            )
+            return deleted_count
+
+        except Exception as exc:
+            logger.error(
+                "Qdrant delete_by_document_id error for '%s': %s",
+                document_id,
+                exc,
+            )
             raise ProviderResponseError(
                 self.provider_name,
                 safe_message=f"Failed to delete document '{document_id}' from Qdrant. Check the logs for details.",

@@ -218,14 +218,14 @@ class TestErrorHandling:
 # ---------------------------------------------------------------------------
 class TestConstructorDefaults:
     def test_default_limit(self) -> None:
-        """Default limit should be 10."""
+        """Default limit should be 3."""
         provider = MagicMock()
         store = MagicMock()
         r = DocumentRetriever(
             embedding_provider=provider,
             vector_store=store,
         )
-        assert r.default_limit == 10
+        assert r.default_limit == 3
 
     def test_custom_default_limit(self) -> None:
         """Custom default limit should be accepted."""

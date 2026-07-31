@@ -2,6 +2,7 @@
 
 ``ChatService`` owns the conversation flow:
 - validates user input
+- optionally retrieves RAG context via ``RAGService``
 - adds user messages to ``Conversation``
 - creates ``ChatRequest`` objects
 - calls the selected LLM provider
@@ -10,6 +11,7 @@
 - returns the full response text
 
 It depends on ``BaseLLMProvider``, ``Conversation``, and ``ChatRequest``.
+When RAG is enabled, it also depends on ``RAGService`` (optional).
 It does not depend on any UI framework or provider SDK.
 """
 
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 from src.exceptions import (
     ChatbotError,
@@ -28,7 +31,13 @@ from src.models.chat import ChatRequest, Conversation
 from src.prompts.system_prompts import get_default_prompt
 from src.providers.base import BaseLLMProvider
 
+if TYPE_CHECKING:
+    from src.rag.rag_service import RAGService
+
 logger = logging.getLogger(__name__)
+
+#: Template for prepending RAG context to the user message.
+_RAG_CONTEXT_TEMPLATE: str = "Relevant context:\n{context}\n\nQuestion:\n{query}"
 
 
 class ChatService:
@@ -47,6 +56,10 @@ class ChatService:
         Sampling temperature (0.0 - 2.0).  Default 0.7.
     max_tokens:
         Maximum tokens in the response.  Default 2048.
+    rag_service:
+        Optional ``RAGService`` instance for retrieval-augmented generation.
+        When provided, retrieved document context is prepended to the user
+        message before sending to the LLM.
     """
 
     def __init__(
@@ -56,6 +69,7 @@ class ChatService:
         system_prompt: str | None = None,
         temperature: float = 0.7,
         max_tokens: int = 2048,
+        rag_service: RAGService | None = None,
     ) -> None:
         if not isinstance(provider, BaseLLMProvider):
             raise TypeError(
@@ -66,6 +80,7 @@ class ChatService:
         self._system_prompt: str = system_prompt or get_default_prompt()
         self._temperature: float = temperature
         self._max_tokens: int = max_tokens
+        self._rag_service: RAGService | None = rag_service
 
     # ------------------------------------------------------------------
     # Properties
@@ -90,6 +105,12 @@ class ChatService:
         """Update the system prompt for subsequent requests."""
         self._system_prompt = value or get_default_prompt()
 
+    @property
+    def rag_service(self) -> RAGService | None:
+        """The optional ``RAGService`` instance, or ``None`` if RAG is
+        not enabled."""
+        return self._rag_service
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -98,11 +119,13 @@ class ChatService:
 
         This method:
         1. Validates the user input (non-empty).
-        2. Adds the user message to *conversation*.
-        3. Creates a ``ChatRequest`` with the current settings.
-        4. Calls ``provider.chat(request)`` and collects all chunks.
-        5. Adds the assistant message to *conversation*.
-        6. Returns the combined response text.
+        2. Optionally retrieves RAG context and prepends it to the user
+           message.
+        3. Adds the user message to *conversation*.
+        4. Creates a ``ChatRequest`` with the current settings.
+        5. Calls ``provider.chat(request)`` and collects all chunks.
+        6. Adds the assistant message to *conversation*.
+        7. Returns the combined response text.
 
         Parameters
         ----------
@@ -129,13 +152,16 @@ class ChatService:
         """
         self._validate_input(content)
 
-        # 1. Add user message
-        conversation.add_user_message(content)
+        # 1. Optionally retrieve RAG context
+        enriched_content = self._enrich_with_context(content)
 
-        # 2. Build request
+        # 2. Add user message
+        conversation.add_user_message(enriched_content)
+
+        # 3. Build request
         request = self._build_request(conversation)
 
-        # 3. Stream and combine
+        # 4. Stream and combine
         full_response: str = ""
         try:
             for chunk in self._provider.chat(request):
@@ -153,7 +179,7 @@ class ChatService:
                 safe_message="An unexpected error occurred while generating a response.",
             ) from exc
 
-        # 4. Add assistant message
+        # 5. Add assistant message
         conversation.add_assistant_message(full_response)
 
         return full_response
@@ -163,10 +189,12 @@ class ChatService:
 
         This method:
         1. Validates the user input (non-empty).
-        2. Adds the user message to *conversation*.
-        3. Creates a ``ChatRequest`` with the current settings.
-        4. Yields each non-empty chunk from ``provider.chat(request)``.
-        5. After all chunks have been consumed, adds the combined
+        2. Optionally retrieves RAG context and prepends it to the user
+           message.
+        3. Adds the user message to *conversation*.
+        4. Creates a ``ChatRequest`` with the current settings.
+        5. Yields each non-empty chunk from ``provider.chat(request)``.
+        6. After all chunks have been consumed, adds the combined
            assistant message to *conversation*.
 
         Parameters
@@ -192,13 +220,16 @@ class ChatService:
         """
         self._validate_input(content)
 
-        # 1. Add user message
-        conversation.add_user_message(content)
+        # 1. Optionally retrieve RAG context
+        enriched_content = self._enrich_with_context(content)
 
-        # 2. Build request
+        # 2. Add user message
+        conversation.add_user_message(enriched_content)
+
+        # 3. Build request
         request = self._build_request(conversation)
 
-        # 3. Stream and yield
+        # 4. Stream and yield
         full_response: str = ""
         try:
             for chunk in self._provider.chat(request):
@@ -218,7 +249,7 @@ class ChatService:
                 safe_message="An unexpected error occurred while generating a response.",
             ) from exc
 
-        # 4. Add assistant message after streaming completes
+        # 5. Add assistant message after streaming completes
         conversation.add_assistant_message(full_response)
 
     # ------------------------------------------------------------------
@@ -242,6 +273,44 @@ class ChatService:
                 "User message cannot be empty.",
                 safe_message="Please enter a message before sending.",
             )
+
+    def _enrich_with_context(self, content: str) -> str:
+        """Optionally retrieve RAG context and prepend it to the user query.
+
+        When ``rag_service`` is configured, this method retrieves
+        relevant document context and formats it into the user message.
+        When ``rag_service`` is ``None``, the original content is
+        returned unchanged.
+
+        Parameters
+        ----------
+        content:
+            The original user message.
+
+        Returns
+        -------
+        str
+            The enriched message (with context) if RAG is enabled, or
+            the original message if not.
+        """
+        if self._rag_service is None:
+            return content
+
+        try:
+            rag_result = self._rag_service.query(content)
+            if rag_result.context:
+                return _RAG_CONTEXT_TEMPLATE.format(
+                    context=rag_result.context,
+                    query=content.strip(),
+                )
+        except ChatbotError:
+            logger.warning("RAG query failed, falling back to original message")
+        except Exception as exc:
+            logger.warning(
+                "Unexpected error during RAG query: %s", exc, exc_info=True
+            )
+
+        return content
 
     def _build_request(self, conversation: Conversation) -> ChatRequest:
         """Build a ``ChatRequest`` from the conversation and current settings.

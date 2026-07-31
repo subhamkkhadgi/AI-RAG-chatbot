@@ -70,13 +70,16 @@ class DocumentIngestionService:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def ingest_file(self, file_path: str) -> str:
+    def ingest_file(self, file_path: str, original_filename: str | None = None) -> str:
         """Ingest a document file into the vector store.
 
         Parameters
         ----------
         file_path:
             Path to the document file (``.pdf`` or ``.txt``).
+        original_filename:
+            Original uploaded filename to store in the document metadata.
+            If ``None``, falls back to the basename of *file_path*.
 
         Returns
         -------
@@ -106,7 +109,9 @@ class DocumentIngestionService:
         content = extract_document(file_path)
 
         # 3. Build Document model and validate
-        document = Document(filename=path.name, content=content)
+        # Use original_filename when provided, otherwise fall back to path.name
+        filename = original_filename if original_filename is not None else path.name
+        document = Document(filename=filename, content=content)
 
         if not document.content.strip():
             raise ConfigurationError(
@@ -211,3 +216,4 @@ class DocumentIngestionService:
     def collection_name(self) -> str:
         """Return the configured collection name."""
         return self._collection_name
+
