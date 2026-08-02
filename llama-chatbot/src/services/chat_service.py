@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from src.exceptions import (
     ChatbotError,
@@ -30,6 +30,7 @@ from src.exceptions import (
 from src.models.chat import ChatRequest, Conversation
 from src.prompts.system_prompts import get_default_prompt
 from src.providers.base import BaseLLMProvider
+from src.rag.citations import build_citations_section
 
 if TYPE_CHECKING:
     from src.rag.rag_service import RAGService
@@ -81,6 +82,11 @@ class ChatService:
         self._temperature: float = temperature
         self._max_tokens: int = max_tokens
         self._rag_service: RAGService | None = rag_service
+        #: The most recent ``RAGResult`` captured during RAG enrichment.
+        #: ``None`` when RAG is disabled, failed, or not yet run.  Retained
+        #: for internal debugging / RAG evaluation (document_id, chunk_index,
+        #: score, page_number, filename).
+        self._last_rag_result: Any = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -110,6 +116,17 @@ class ChatService:
         """The optional ``RAGService`` instance, or ``None`` if RAG is
         not enabled."""
         return self._rag_service
+
+    @property
+    def last_rag_result(self) -> Any:
+        """The most recent ``RAGResult`` captured during RAG enrichment.
+
+        Returns ``None`` when RAG is disabled, failed, or not yet run.
+        The result preserves full retrieval metadata (``document_id``,
+        ``filename``, ``chunk_index``, ``page_number``, ``score``) for
+        internal debugging / RAG evaluation.
+        """
+        return self._last_rag_result
 
     # ------------------------------------------------------------------
     # Public API
@@ -179,10 +196,13 @@ class ChatService:
                 safe_message="An unexpected error occurred while generating a response.",
             ) from exc
 
-        # 5. Add assistant message
-        conversation.add_assistant_message(full_response)
+        # 5. Append backend-generated citations (from retrieved metadata)
+        final_response = self._append_citations(full_response)
 
-        return full_response
+        # 6. Add assistant message
+        conversation.add_assistant_message(final_response)
+
+        return final_response
 
     def stream_message(self, conversation: Conversation, content: str) -> Iterator[str]:
         """Send a user message and yield response chunks as they arrive.
@@ -249,8 +269,11 @@ class ChatService:
                 safe_message="An unexpected error occurred while generating a response.",
             ) from exc
 
-        # 5. Add assistant message after streaming completes
-        conversation.add_assistant_message(full_response)
+        # 5. Append backend-generated citations (from retrieved metadata)
+        final_response = self._append_citations(full_response)
+
+        # 6. Add assistant message after streaming completes
+        conversation.add_assistant_message(final_response)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -294,23 +317,67 @@ class ChatService:
             the original message if not.
         """
         if self._rag_service is None:
+            self._last_rag_result = None
             return content
 
         try:
             rag_result = self._rag_service.query(content)
+            self._last_rag_result = rag_result
             if rag_result.context:
                 return _RAG_CONTEXT_TEMPLATE.format(
                     context=rag_result.context,
                     query=content.strip(),
                 )
         except ChatbotError:
+            self._last_rag_result = None
             logger.warning("RAG query failed, falling back to original message")
         except Exception as exc:
+            self._last_rag_result = None
             logger.warning(
                 "Unexpected error during RAG query: %s", exc, exc_info=True
             )
 
         return content
+
+    def _append_citations(self, response: str) -> str:
+        """Append a backend-generated ``Sources:`` section to *response*.
+
+        Citations are derived from the metadata of the most recent RAG
+        retrieval (filename + optional page number) — **not** from the
+        LLM output.  The section is omitted when:
+
+        - RAG is disabled (``rag_service`` is ``None``)
+        - the RAG query failed
+        - retrieval returned no chunks
+
+        Internal metadata (``document_id``, ``chunk_index``, Qdrant point
+        IDs, similarity scores) is intentionally not shown to the user.
+
+        Parameters
+        ----------
+        response:
+            The raw LLM response text.
+
+        Returns
+        -------
+        str
+            The response with the citations block appended when
+            retrieved chunks exist, otherwise the response unchanged.
+        """
+        rag_result = self._last_rag_result
+        if rag_result is None:
+            return response
+
+        retrieval_result = getattr(rag_result, "retrieval_result", None)
+        if retrieval_result is None:
+            return response
+
+        chunks = getattr(retrieval_result, "chunks", None)
+        citations = build_citations_section(chunks)
+        if not citations:
+            return response
+
+        return f"{response}{citations}"
 
     def _build_request(self, conversation: Conversation) -> ChatRequest:
         """Build a ``ChatRequest`` from the conversation and current settings.

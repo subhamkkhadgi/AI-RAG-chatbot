@@ -19,6 +19,8 @@ from src.exceptions import (
 from src.models.chat import ChatRequest, ChatRole, Conversation
 from src.prompts.system_prompts import get_default_prompt
 from src.providers.base import BaseLLMProvider
+from src.rag.rag_service import RAGResult
+from src.retrieval.models import RetrievedChunk, RetrievalResult
 from src.services.chat_service import ChatService
 
 
@@ -527,4 +529,225 @@ class TestRAGSendMessage:
         )
         conversation = Conversation()
         service.send_message(conversation, "test query")
+
+
+# ======================================================================
+# Citation Tests
+# ======================================================================
+
+def _make_rag_chunk(
+    filename: str = "report.pdf",
+    text: str = "Relevant content.",
+    page_number: int | None = None,
+    chunk_index: int = 0,
+    document_id: str = "doc-1",
+    score: float = 0.95,
+) -> RetrievedChunk:
+    """Build a real ``RetrievedChunk`` for citation tests."""
+    return RetrievedChunk(
+        chunk_id=f"chunk-{chunk_index}",
+        document_id=document_id,
+        filename=filename,
+        chunk_index=chunk_index,
+        text=text,
+        score=score,
+        page_number=page_number,
+    )
+
+
+def _make_rag_result_with_chunks(
+    chunks: list[RetrievedChunk] | None,
+) -> RAGResult:
+    """Build a real ``RAGResult`` with the given chunks."""
+    retrieval_result = RetrievalResult(
+        query="test query",
+        chunks=chunks or [],
+        total_results=len(chunks or []),
+    )
+    return RAGResult(
+        query="test query",
+        retrieval_result=retrieval_result,
+        context="Relevant document context.",
+    )
+
+
+def _make_rag_service(rag_result: RAGResult) -> MagicMock:
+    """Build a mocked RAGService returning *rag_result*."""
+    rag_service = MagicMock()
+    rag_service.query.return_value = rag_result
+    return rag_service
+
+
+class TestCitationsAppended:
+    """Citations should be appended when retrieval succeeds."""
+
+    def test_send_message_appends_citations(self) -> None:
+        """send_message should append a Sources section to the response."""
+        provider = _make_mock_provider(chunks=["The answer."])
+        rag_service = _make_rag_service(
+            _make_rag_result_with_chunks(
+                [_make_rag_chunk(filename="report.pdf", page_number=3)]
+            )
+        )
+        service = ChatService(
+            provider=provider,
+            model="test-model",
+            rag_service=rag_service,
+        )
+        conversation = Conversation()
+        result = service.send_message(conversation, "test query")
+
+        assert result == "The answer.\n\nSources:\n- report.pdf (Page 3)"
+        assert conversation.messages[-1].content == result
+
+    def test_stream_message_appends_citations_to_conversation(self) -> None:
+        """stream_message should store the cited text in the conversation."""
+        provider = _make_mock_provider(chunks=["Streamed ", "answer."])
+        rag_service = _make_rag_service(
+            _make_rag_result_with_chunks(
+                [_make_rag_chunk(filename="notes.txt", page_number=None)]
+            )
+        )
+        service = ChatService(
+            provider=provider,
+            model="test-model",
+            rag_service=rag_service,
+        )
+        conversation = Conversation()
+
+        yielded = list(service.stream_message(conversation, "test query"))
+
+        # Streaming chunks themselves are unchanged.
+        assert yielded == ["Streamed ", "answer."]
+        # The stored assistant message includes citations.
+        assert conversation.messages[-1].content == (
+            "Streamed answer.\n\nSources:\n- notes.txt"
+        )
+
+    def test_citations_deduplicated(self) -> None:
+        """Duplicate filename+page citations appear only once."""
+        provider = _make_mock_provider(chunks=["Answer"])
+        rag_service = _make_rag_service(
+            _make_rag_result_with_chunks(
+                [
+                    _make_rag_chunk(
+                        filename="report.pdf", page_number=2, chunk_index=0
+                    ),
+                    _make_rag_chunk(
+                        filename="report.pdf", page_number=2, chunk_index=1
+                    ),
+                    _make_rag_chunk(
+                        filename="report.pdf", page_number=3, chunk_index=2
+                    ),
+                ]
+            )
+        )
+        service = ChatService(
+            provider=provider,
+            model="test-model",
+            rag_service=rag_service,
+        )
+        conversation = Conversation()
+        result = service.send_message(conversation, "test query")
+
+        assert result.count("- report.pdf (Page 2)") == 1
+        assert result.count("- report.pdf (Page 3)") == 1
+
+    def test_last_rag_result_preserves_metadata(self) -> None:
+        """last_rag_result should expose full retrieval metadata."""
+        provider = _make_mock_provider(chunks=["Answer"])
+        rag_chunk = _make_rag_chunk(
+            filename="report.pdf",
+            page_number=3,
+            chunk_index=2,
+            document_id="internal-doc",
+            score=0.987,
+        )
+        rag_service = _make_rag_service(
+            _make_rag_result_with_chunks([rag_chunk])
+        )
+        service = ChatService(
+            provider=provider,
+            model="test-model",
+            rag_service=rag_service,
+        )
+        conversation = Conversation()
+        service.send_message(conversation, "test query")
+
+        last = service.last_rag_result
+        assert last is not None
+        assert last.retrieval_result.chunks[0].document_id == "internal-doc"
+        assert last.retrieval_result.chunks[0].chunk_index == 2
+        assert last.retrieval_result.chunks[0].score == 0.987
+        assert last.retrieval_result.chunks[0].filename == "report.pdf"
+        assert last.retrieval_result.chunks[0].page_number == 3
+
+
+class TestCitationsOmitted:
+    """Citations should be omitted when RAG is disabled / fails / empty."""
+
+    def test_no_citations_when_rag_disabled(self) -> None:
+        """Without RAG, the response should have no Sources section."""
+        provider = _make_mock_provider(chunks=["Answer"])
+        service = _make_service(provider)
+        conversation = Conversation()
+        result = service.send_message(conversation, "Hello")
+
+        assert result == "Answer"
+        assert "Sources:" not in result
+        assert service.last_rag_result is None
+
+    def test_no_citations_when_rag_fails(self) -> None:
+        """When RAG query fails, no Sources section should appear."""
+        provider = _make_mock_provider(chunks=["Answer"])
+        rag_service = MagicMock()
+        rag_service.query.side_effect = ChatbotError("RAG failed")
+
+        service = ChatService(
+            provider=provider,
+            model="test-model",
+            rag_service=rag_service,
+        )
+        conversation = Conversation()
+        result = service.send_message(conversation, "test query")
+
+        assert result == "Answer"
+        assert "Sources:" not in result
+        assert service.last_rag_result is None
+
+    def test_no_citations_when_no_chunks(self) -> None:
+        """When retrieval returns no chunks, no Sources section."""
+        provider = _make_mock_provider(chunks=["Answer"])
+        rag_service = _make_rag_service(_make_rag_result_with_chunks([]))
+        service = ChatService(
+            provider=provider,
+            model="test-model",
+            rag_service=rag_service,
+        )
+        conversation = Conversation()
+        result = service.send_message(conversation, "test query")
+
+        assert result == "Answer"
+        assert "Sources:" not in result
+
+    def test_no_citations_when_context_empty(self) -> None:
+        """When RAG context is empty, the response should stay unchanged."""
+        provider = _make_mock_provider(chunks=["Answer"])
+        # A MagicMock RAG result with empty context (retrieval_result is
+        # a MagicMock so the citation builder must safely ignore it).
+        rag_service = MagicMock()
+        rag_service.query.return_value.query = "test query"
+        rag_service.query.return_value.context = ""
+        rag_service.query.return_value.retrieval_result = MagicMock()
+
+        service = ChatService(
+            provider=provider,
+            model="test-model",
+            rag_service=rag_service,
+        )
+        conversation = Conversation()
+        result = service.send_message(conversation, "test query")
+
+        assert result == "Answer"
+        assert "Sources:" not in result
 
