@@ -16,6 +16,34 @@ class ChatRole(enum.StrEnum):
     ASSISTANT = "assistant"
 
 
+class SourceRef(BaseModel):
+    """A structured source reference attached to an assistant message.
+
+    Attributes:
+        filename: Original filename of the source document.
+        page_number: Optional page number when available.
+        text: The retrieved chunk text, used for the "Relevant excerpt"
+            shown in the UI.
+        score: Optional similarity score kept internally for RAG
+            evaluation.  Never displayed to the user.
+    """
+
+    filename: str
+    page_number: int | None = None
+    text: str | None = None
+    score: float | None = None
+
+    @field_validator("filename")
+    @classmethod
+    def _filename_must_not_be_empty(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("filename must not be empty")
+        return stripped
+
+    model_config = {"frozen": True}
+
+
 class ChatMessage(BaseModel):
     """A single message in a chat conversation.
 
@@ -25,11 +53,15 @@ class ChatMessage(BaseModel):
             content is rejected at construction time.
         timestamp: UTC-aware datetime set automatically when the message is
             created.  Callers should not pass this manually.
+        sources: Optional structured source references (assistant messages
+            only).  ``None`` for user/system messages or when RAG returned
+            no sources.
     """
 
     role: ChatRole
     content: str
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    sources: list[SourceRef] | None = None
 
     @field_validator("content")
     @classmethod
@@ -61,9 +93,20 @@ class Conversation(BaseModel):
         self.messages.append(msg)
         return msg
 
-    def add_assistant_message(self, content: str) -> ChatMessage:
-        """Create an assistant message with *content*, append it, and return it."""
-        msg = ChatMessage(role=ChatRole.ASSISTANT, content=content)
+    def add_assistant_message(
+        self, content: str, sources: list[SourceRef] | None = None
+    ) -> ChatMessage:
+        """Create an assistant message with *content*, append it, and return it.
+
+        Parameters
+        ----------
+        content:
+            The assistant message body.
+        sources:
+            Optional structured source references attached to the message
+            (assistant messages with RAG citations).  Defaults to ``None``.
+        """
+        msg = ChatMessage(role=ChatRole.ASSISTANT, content=content, sources=sources)
         self.messages.append(msg)
         return msg
 

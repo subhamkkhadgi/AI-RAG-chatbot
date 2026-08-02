@@ -27,10 +27,10 @@ from src.exceptions import (
     ProviderConnectionError,
     ProviderResponseError,
 )
-from src.models.chat import ChatRequest, Conversation
+from src.models.chat import ChatRequest, Conversation, SourceRef
 from src.prompts.system_prompts import get_default_prompt
 from src.providers.base import BaseLLMProvider
-from src.rag.citations import build_citations_section
+from src.rag.citations import build_citations_section, build_source_refs
 
 if TYPE_CHECKING:
     from src.rag.rag_service import RAGService
@@ -141,7 +141,8 @@ class ChatService:
         3. Adds the user message to *conversation*.
         4. Creates a ``ChatRequest`` with the current settings.
         5. Calls ``provider.chat(request)`` and collects all chunks.
-        6. Adds the assistant message to *conversation*.
+        6. Adds the assistant message (with structured sources, if any)
+           to *conversation*.
         7. Returns the combined response text.
 
         Parameters
@@ -197,10 +198,10 @@ class ChatService:
             ) from exc
 
         # 5. Append backend-generated citations (from retrieved metadata)
-        final_response = self._append_citations(full_response)
+        final_response, sources = self._build_cited_response(full_response)
 
-        # 6. Add assistant message
-        conversation.add_assistant_message(final_response)
+        # 6. Add assistant message (with structured sources when present)
+        conversation.add_assistant_message(final_response, sources=sources)
 
         return final_response
 
@@ -270,10 +271,10 @@ class ChatService:
             ) from exc
 
         # 5. Append backend-generated citations (from retrieved metadata)
-        final_response = self._append_citations(full_response)
+        final_response, sources = self._build_cited_response(full_response)
 
         # 6. Add assistant message after streaming completes
-        conversation.add_assistant_message(final_response)
+        conversation.add_assistant_message(final_response, sources=sources)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -339,12 +340,15 @@ class ChatService:
 
         return content
 
-    def _append_citations(self, response: str) -> str:
-        """Append a backend-generated ``Sources:`` section to *response*.
+    def _build_cited_response(
+        self,
+        response: str,
+    ) -> tuple[str, list[SourceRef] | None]:
+        """Append a backend-generated ``Sources:`` section and build sources.
 
         Citations are derived from the metadata of the most recent RAG
         retrieval (filename + optional page number) — **not** from the
-        LLM output.  The section is omitted when:
+        LLM output.  The section and source refs are omitted when:
 
         - RAG is disabled (``rag_service`` is ``None``)
         - the RAG query failed
@@ -360,24 +364,31 @@ class ChatService:
 
         Returns
         -------
-        str
-            The response with the citations block appended when
-            retrieved chunks exist, otherwise the response unchanged.
+        tuple[str, list[SourceRef] | None]
+            A ``(text, sources)`` pair.  ``text`` is the response with the
+            citations block appended when retrieved chunks exist, otherwise
+            the response unchanged.  ``sources`` is the structured list of
+            source refs (with chunk text and score kept internally), or
+            ``None`` when no usable chunks exist.
         """
         rag_result = self._last_rag_result
         if rag_result is None:
-            return response
+            return response, None
 
         retrieval_result = getattr(rag_result, "retrieval_result", None)
         if retrieval_result is None:
-            return response
+            return response, None
 
         chunks = getattr(retrieval_result, "chunks", None)
+        sources = build_source_refs(chunks)
+        if not sources:
+            return response, None
+
         citations = build_citations_section(chunks)
         if not citations:
-            return response
+            return response, sources
 
-        return f"{response}{citations}"
+        return f"{response}{citations}", sources
 
     def _build_request(self, conversation: Conversation) -> ChatRequest:
         """Build a ``ChatRequest`` from the conversation and current settings.

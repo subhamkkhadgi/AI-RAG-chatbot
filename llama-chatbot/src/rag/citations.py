@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from src.models.chat import SourceRef
 from src.retrieval.models import RetrievedChunk
 
 #: Header line for the citations block.
@@ -48,14 +49,50 @@ def build_citations_section(
         A formatted citations block, or an empty string when there are
         no usable chunks.  Never returns a bare ``"Sources:"`` header.
     """
-    if chunks is None:
-        return ""
-    if not isinstance(chunks, (list, tuple)):
-        return ""
-    if not chunks:
+    refs = build_source_refs(chunks)
+    if not refs:
         return ""
 
     lines: list[str] = []
+    for ref in refs:
+        if ref.page_number is not None:
+            lines.append(f"{_BULLET}{ref.filename} (Page {ref.page_number})")
+        else:
+            lines.append(f"{_BULLET}{ref.filename}")
+
+    return f"{_CITATIONS_HEADER}\n" + "\n".join(lines)
+
+
+def build_source_refs(
+    chunks: list[RetrievedChunk] | None,
+) -> list[SourceRef]:
+    """Build a structured, deduplicated list of ``SourceRef`` objects.
+
+    Citations are deduplicated by ``(filename, page_number)`` while
+    preserving first-seen order.  The returned refs retain the retrieved
+    chunk text (for "Relevant excerpt" in the UI) and the similarity
+    score (internal only — never displayed).
+
+    Parameters
+    ----------
+    chunks:
+        The ordered list of retrieved chunks (most relevant first), or
+        ``None``.
+
+    Returns
+    -------
+    list[SourceRef]
+        A list of structured source references.  Empty when there are no
+        usable chunks.
+    """
+    if chunks is None:
+        return []
+    if not isinstance(chunks, (list, tuple)):
+        return []
+    if not chunks:
+        return []
+
+    refs: list[SourceRef] = []
     seen: set[tuple[str, int | None]] = set()
 
     for chunk in chunks:
@@ -70,16 +107,17 @@ def build_citations_section(
             continue
         seen.add(key)
 
-        if page_number is not None:
-            lines.append(f"{_BULLET}{filename} (Page {page_number})")
-        else:
-            lines.append(f"{_BULLET}{filename}")
+        refs.append(
+            SourceRef(
+                filename=filename,
+                page_number=page_number,
+                text=getattr(chunk, "text", None),
+                score=getattr(chunk, "score", None),
+            )
+        )
 
-    if not lines:
-        return ""
-
-    return f"{_CITATIONS_HEADER}\n" + "\n".join(lines)
+    return refs
 
 
-__all__ = ["build_citations_section"]
+__all__ = ["build_citations_section", "build_source_refs"]
 

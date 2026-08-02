@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.rag.citations import build_citations_section
+from src.rag.citations import build_citations_section, build_source_refs
 from src.retrieval.models import RetrievedChunk
 
 
@@ -172,4 +172,68 @@ class TestNoInternalLeak:
         assert "chunk_index" not in output
         assert "0.987" not in output
         assert "score" not in output
+
+
+# ---------------------------------------------------------------------------
+# Structured source refs (Sprint 8D)
+# ---------------------------------------------------------------------------
+class TestBuildSourceRefs:
+    def test_returns_source_refs(self) -> None:
+        """build_source_refs should return structured SourceRef objects."""
+        chunks = [
+            _make_chunk(filename="report.pdf", page_number=3, text="Excerpt A."),
+        ]
+        refs = build_source_refs(chunks)
+
+        assert len(refs) == 1
+        assert refs[0].filename == "report.pdf"
+        assert refs[0].page_number == 3
+        assert refs[0].text == "Excerpt A."
+        assert refs[0].score == 0.95
+
+    def test_deduplicates_by_filename_and_page(self) -> None:
+        """Duplicate (filename, page) pairs should be collapsed."""
+        chunks = [
+            _make_chunk(filename="report.pdf", page_number=2, chunk_index=0),
+            _make_chunk(filename="report.pdf", page_number=2, chunk_index=1),
+            _make_chunk(filename="report.pdf", page_number=3, chunk_index=2),
+        ]
+        refs = build_source_refs(chunks)
+
+        assert len(refs) == 2
+        assert refs[0].filename == "report.pdf"
+        assert refs[0].page_number == 2
+        assert refs[1].filename == "report.pdf"
+        assert refs[1].page_number == 3
+
+    def test_page_number_optional(self) -> None:
+        """Sources without a page number should carry None."""
+        refs = build_source_refs([_make_chunk(filename="notes.txt", page_number=None)])
+
+        assert refs[0].page_number is None
+
+    def test_none_returns_empty(self) -> None:
+        """``None`` should return an empty list."""
+        assert build_source_refs(None) == []
+
+    def test_empty_list_returns_empty(self) -> None:
+        """An empty list should return an empty list."""
+        assert build_source_refs([]) == []
+
+    def test_non_list_input_returns_empty(self) -> None:
+        """Non-list/tuple input (e.g. MagicMock) should be tolerated."""
+        assert build_source_refs(object()) == []
+
+    def test_missing_filename_skipped(self) -> None:
+        """Chunks without a usable filename should be skipped."""
+        class _ChunkLike:
+            filename = ""
+
+        assert build_source_refs([_ChunkLike()]) == []  # type: ignore[list-item]
+
+    def test_source_refs_are_frozen(self) -> None:
+        """SourceRef instances should be immutable (frozen model)."""
+        refs = build_source_refs([_make_chunk(filename="report.pdf")])
+        with pytest.raises(Exception):
+            refs[0].filename = "changed.pdf"  # type: ignore[misc]
 
