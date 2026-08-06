@@ -96,6 +96,7 @@ class BaseVectorStore(ABC):
         self,
         vector: list[float],
         limit: int = 10,
+        filter_dict: dict | None = None,
     ) -> list[dict]:
         """Search for the nearest neighbours of a query vector.
 
@@ -105,6 +106,9 @@ class BaseVectorStore(ABC):
             The query vector to search with.
         limit:
             Maximum number of results to return.
+        filter_dict:
+            Optional payload filter to narrow results (e.g. restrict to
+            specific ``document_id`` values).  ``None`` means unrestricted.
 
         Returns
         -------

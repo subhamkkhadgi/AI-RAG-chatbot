@@ -24,6 +24,8 @@ from typing import Final
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.prompts.system_prompts import get_default_prompt
+
 # ---------------------------------------------------------------------------
 # Allowed values
 # ---------------------------------------------------------------------------
@@ -61,6 +63,25 @@ class Settings(BaseSettings):
     embedding_provider: str = "ollama"
     embedding_model: str = "nomic-embed-text"
 
+    # ── Retrieval precision ───────────────────────────────────────────
+    #: Minimum cosine-similarity score for a chunk to be considered
+    #: relevant.  Chunks with ``score < retrieval_min_score`` are dropped.
+    retrieval_min_score: float = 0.3
+    #: Maximum number of documents allowed in a single retrieval result.
+    #: ``0`` means unlimited (threshold-only filtering).  A positive value
+    #: keeps only the top-``max_documents`` documents ranked by their best
+    #: chunk score, which prevents unrelated documents from being mixed in
+    #: just because they appear inside the top-k results.
+    retrieval_max_documents: int = 1
+
+    #: Minimum retrieval confidence required to inject retrieved context
+    #: into the LLM prompt (confidence-aware RAG).  Confidence is measured
+    #: as the highest chunk similarity score in the retrieval result.
+    #: When retrieval confidence is below this threshold, the weak/irrelevant
+    #: context is NOT injected and the LLM answers from its own knowledge
+    #: (with no citations).
+    retrieval_confidence_threshold: float = 0.6
+
     # ── Qdrant (optional — validated when selected) ───────────────────
     qdrant_host: str = "localhost"
     qdrant_port: int = 6333
@@ -71,10 +92,10 @@ class Settings(BaseSettings):
     ollama_model: str = "llama3.1:8b"
 
     # ── Defaults (overridable at runtime via sidebar) ─────────────────
-    default_system_prompt: str = (
-        "You are a helpful, respectful and honest assistant. "
-        "Answer concisely and accurately."
-    )
+    #: Default system prompt.  Single source of truth lives in the
+    #: provider-neutral ``src.prompts.system_prompts`` module; this field
+    #: delegates to it so the app and the prompt registry never diverge.
+    default_system_prompt: str = get_default_prompt()
     temperature: float = 0.7
     max_tokens: int = 2048
 
@@ -128,6 +149,33 @@ class Settings(BaseSettings):
                 f"OLLAMA_HOST must start with http:// or https://, got {v!r}"
             )
         return stripped
+
+    @field_validator("retrieval_min_score")
+    @classmethod
+    def _validate_retrieval_min_score(cls, v: float) -> float:
+        if v < 0.0 or v > 1.0:
+            raise ValueError(
+                f"RETRIEVAL_MIN_SCORE must be between 0.0 and 1.0, got {v}"
+            )
+        return v
+
+    @field_validator("retrieval_max_documents")
+    @classmethod
+    def _validate_retrieval_max_documents(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(
+                f"RETRIEVAL_MAX_DOCUMENTS must be a non-negative integer, got {v}"
+            )
+        return v
+
+    @field_validator("retrieval_confidence_threshold")
+    @classmethod
+    def _validate_retrieval_confidence_threshold(cls, v: float) -> float:
+        if v < 0.0 or v > 1.0:
+            raise ValueError(
+                f"RETRIEVAL_CONFIDENCE_THRESHOLD must be between 0.0 and 1.0, got {v}"
+            )
+        return v
 
     @field_validator("temperature")
     @classmethod

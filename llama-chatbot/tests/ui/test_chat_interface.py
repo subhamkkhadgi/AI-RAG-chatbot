@@ -10,9 +10,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.config import clear_settings_cache
+from src.config import clear_settings_cache, get_settings
 from src.models.chat import Conversation, SourceRef
-from src.ui.chat_interface import render_chat_interface
+from src.providers.base import BaseLLMProvider
+from src.ui.chat_interface import render_chat_interface, _build_chat_service
 from src.ui.sidebar import (
     CONVERSATION_KEY,
     PROVIDER_KEY,
@@ -301,3 +302,55 @@ class TestSourceRendering:
         assert "score" not in all_text
         assert "document_id" not in all_text
         assert "chunk_index" not in all_text
+
+
+# ======================================================================
+# Confidence Threshold Wiring (Sprint 9B.1)
+# ======================================================================
+
+class TestConfidenceThresholdWiring:
+    """Verify the configured retrieval confidence threshold is passed into
+    ChatService through the application construction path."""
+
+    def test_build_chat_service_passes_configured_threshold(
+        self, mock_session_state: MagicMock
+    ) -> None:
+        """The constructed ChatService should receive the configured
+        retrieval_confidence_threshold from settings."""
+        _init_state(mock_session_state)
+        settings = get_settings()
+        expected = settings.retrieval_confidence_threshold
+
+        with (
+            patch("streamlit.session_state", mock_session_state),
+            patch("src.ui.chat_interface.create_provider") as provider_mock,
+            patch("src.ui.chat_interface.create_embedding_provider"),
+            patch("src.ui.chat_interface.create_vector_store"),
+        ):
+            provider_mock.return_value = MagicMock(spec=BaseLLMProvider)
+            service = _build_chat_service()
+
+        assert service is not None
+        assert service.confidence_threshold == expected
+
+    def test_confidence_threshold_is_not_none_when_configured(
+        self, mock_session_state: MagicMock
+    ) -> None:
+        """When retrieval_confidence_threshold is configured, the
+        ChatService should not have a None threshold (i.e. gating active)."""
+        _init_state(mock_session_state)
+        settings = get_settings()
+        if settings.retrieval_confidence_threshold is None:
+            pytest.skip("retrieval_confidence_threshold not configured")
+
+        with (
+            patch("streamlit.session_state", mock_session_state),
+            patch("src.ui.chat_interface.create_provider") as provider_mock,
+            patch("src.ui.chat_interface.create_embedding_provider"),
+            patch("src.ui.chat_interface.create_vector_store"),
+        ):
+            provider_mock.return_value = MagicMock(spec=BaseLLMProvider)
+            service = _build_chat_service()
+
+        assert service.confidence_threshold is not None
+        assert service.confidence_threshold == settings.retrieval_confidence_threshold

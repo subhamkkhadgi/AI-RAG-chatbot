@@ -537,7 +537,7 @@ class TestRAGSendMessage:
 
 def _make_rag_chunk(
     filename: str = "report.pdf",
-    text: str = "Relevant content.",
+    text: str = "The answer content.",
     page_number: int | None = None,
     chunk_index: int = 0,
     document_id: str = "doc-1",
@@ -579,10 +579,12 @@ def _make_rag_service(rag_result: RAGResult) -> MagicMock:
 
 
 class TestCitationsAppended:
-    """Citations should be appended when retrieval succeeds."""
+    """Citations should be attached as structured sources when retrieval
+    succeeds."""
 
-    def test_send_message_appends_citations(self) -> None:
-        """send_message should append a Sources section to the response."""
+    def test_send_message_attaches_structured_sources(self) -> None:
+        """send_message should attach structured sources and keep the raw
+        answer text (no plain-text Sources block)."""
         provider = _make_mock_provider(chunks=["The answer."])
         rag_service = _make_rag_service(
             _make_rag_result_with_chunks(
@@ -597,11 +599,19 @@ class TestCitationsAppended:
         conversation = Conversation()
         result = service.send_message(conversation, "test query")
 
-        assert result == "The answer.\n\nSources:\n- report.pdf (Page 3)"
-        assert conversation.messages[-1].content == result
+        # The message body is the raw answer only — no Sources block.
+        assert result == "The answer."
+        assert "Sources:" not in result
+        assert conversation.messages[-1].content == "The answer."
+        # Structured sources are attached.
+        assert conversation.messages[-1].sources is not None
+        assert len(conversation.messages[-1].sources) == 1
+        assert conversation.messages[-1].sources[0].filename == "report.pdf"
+        assert conversation.messages[-1].sources[0].page_number == 3
 
-    def test_stream_message_appends_citations_to_conversation(self) -> None:
-        """stream_message should store the cited text in the conversation."""
+    def test_stream_message_attaches_structured_sources(self) -> None:
+        """stream_message should store the raw answer text and attach
+        structured sources."""
         provider = _make_mock_provider(chunks=["Streamed ", "answer."])
         rag_service = _make_rag_service(
             _make_rag_result_with_chunks(
@@ -619,13 +629,16 @@ class TestCitationsAppended:
 
         # Streaming chunks themselves are unchanged.
         assert yielded == ["Streamed ", "answer."]
-        # The stored assistant message includes citations.
-        assert conversation.messages[-1].content == (
-            "Streamed answer.\n\nSources:\n- notes.txt"
-        )
+        # The stored assistant message is the raw answer — no Sources block.
+        assert conversation.messages[-1].content == "Streamed answer."
+        assert "Sources:" not in conversation.messages[-1].content
+        # Structured sources are attached.
+        assert conversation.messages[-1].sources is not None
+        assert len(conversation.messages[-1].sources) == 1
+        assert conversation.messages[-1].sources[0].filename == "notes.txt"
 
     def test_citations_deduplicated(self) -> None:
-        """Duplicate filename+page citations appear only once."""
+        """Duplicate filename+page citations appear only once in sources."""
         provider = _make_mock_provider(chunks=["Answer"])
         rag_service = _make_rag_service(
             _make_rag_result_with_chunks(
@@ -650,8 +663,14 @@ class TestCitationsAppended:
         conversation = Conversation()
         result = service.send_message(conversation, "test query")
 
-        assert result.count("- report.pdf (Page 2)") == 1
-        assert result.count("- report.pdf (Page 3)") == 1
+        assert result == "Answer"
+        sources = conversation.messages[-1].sources
+        assert sources is not None
+        assert len(sources) == 2
+        assert sources[0].filename == "report.pdf"
+        assert sources[0].page_number == 2
+        assert sources[1].filename == "report.pdf"
+        assert sources[1].page_number == 3
 
     def test_last_rag_result_preserves_metadata(self) -> None:
         """last_rag_result should expose full retrieval metadata."""
@@ -768,7 +787,7 @@ class TestStructuredSources:
                     _make_rag_chunk(
                         filename="report.pdf",
                         page_number=3,
-                        text="Excerpt content.",
+                        text="Answer content.",
                     )
                 ]
             )
@@ -786,7 +805,7 @@ class TestStructuredSources:
         assert len(assistant.sources) == 1
         assert assistant.sources[0].filename == "report.pdf"
         assert assistant.sources[0].page_number == 3
-        assert assistant.sources[0].text == "Excerpt content."
+        assert assistant.sources[0].text == "Answer content."
         assert assistant.sources[0].score == 0.95
 
     def test_stream_message_attaches_sources(self) -> None:
@@ -854,8 +873,9 @@ class TestStructuredSources:
         assistant = conversation.messages[-1]
         assert assistant.sources is None
 
-    def test_backward_compatible_content_includes_sources_block(self) -> None:
-        """The content still contains the plain-text Sources block."""
+    def test_content_has_no_plain_text_sources_block(self) -> None:
+        """The assistant message content should NOT contain a plain-text
+        Sources block (citations are rendered only via structured sources)."""
         provider = _make_mock_provider(chunks=["Answer"])
         rag_service = _make_rag_service(
             _make_rag_result_with_chunks(
@@ -870,6 +890,143 @@ class TestStructuredSources:
         conversation = Conversation()
         result = service.send_message(conversation, "test query")
 
-        assert result == "Answer\n\nSources:\n- report.pdf (Page 5)"
-        assert "Sources:" in conversation.messages[-1].content
+        assert result == "Answer"
+        assert "Sources:" not in result
+        assert "Sources:" not in conversation.messages[-1].content
+        # Structured sources still attached.
+        assert conversation.messages[-1].sources is not None
+        assert len(conversation.messages[-1].sources) == 1
+        assert conversation.messages[-1].sources[0].filename == "report.pdf"
+        assert conversation.messages[-1].sources[0].page_number == 5
 
+
+# ======================================================================
+# Answer-Aware Citation Filtering
+# ======================================================================
+
+class TestAnswerAwareCitationFiltering:
+    """Citations should only include chunks that lexically support the
+    generated answer."""
+
+    def test_unsupported_chunk_removed_from_citations(self) -> None:
+        """A chunk that does not support the answer is not cited."""
+        provider = _make_mock_provider(chunks=["The project is named Atlas."])
+        supporting = _make_rag_chunk(
+            filename="report.pdf",
+            page_number=1,
+            text="The project is named Atlas.",
+        )
+        unsupported = _make_rag_chunk(
+            filename="report.pdf",
+            page_number=9,
+            text="The budget is allocated to the team.",
+            chunk_index=1,
+        )
+        rag_service = _make_rag_service(
+            _make_rag_result_with_chunks([supporting, unsupported])
+        )
+        service = ChatService(
+            provider=provider,
+            model="test-model",
+            rag_service=rag_service,
+        )
+        conversation = Conversation()
+        result = service.send_message(conversation, "test query")
+
+        # The message body is the raw answer — no Sources block.
+        assert result == "The project is named Atlas."
+        assert "Sources:" not in result
+        assistant = conversation.messages[-1]
+        assert len(assistant.sources) == 1
+        assert assistant.sources[0].page_number == 1
+
+    def test_no_supporting_chunks_means_no_citations(self) -> None:
+        """When no chunk supports the answer, no Sources section is shown."""
+        provider = _make_mock_provider(chunks=["The project is named Atlas."])
+        unsupported = _make_rag_chunk(
+            filename="report.pdf",
+            page_number=9,
+            text="The budget is allocated to the team.",
+        )
+        rag_service = _make_rag_service(
+            _make_rag_result_with_chunks([unsupported])
+        )
+        service = ChatService(
+            provider=provider,
+            model="test-model",
+            rag_service=rag_service,
+        )
+        conversation = Conversation()
+        result = service.send_message(conversation, "test query")
+
+        assert result == "The project is named Atlas."
+        assert "Sources:" not in result
+        assistant = conversation.messages[-1]
+        assert assistant.sources is None
+
+
+# ======================================================================
+# Confidence-Gated Citations (Sprint 8)
+# ======================================================================
+
+class TestConfidenceGatedCitations:
+    """Citations should only appear when retrieval confidence passes the
+    configured threshold."""
+
+    def test_citations_appended_when_confidence_meets_threshold(self) -> None:
+        """With a threshold set and confidence above it, citations appear."""
+        provider = _make_mock_provider(chunks=["Answer"])
+        rag_chunk = _make_rag_chunk(
+            filename="report.pdf", page_number=3, score=0.95
+        )
+        rag_service = _make_rag_service(
+            _make_rag_result_with_chunks([rag_chunk])
+        )
+        service = ChatService(
+            provider=provider,
+            model="test-model",
+            rag_service=rag_service,
+            confidence_threshold=0.6,
+        )
+        conversation = Conversation()
+        result = service.send_message(conversation, "test query")
+
+        # Raw answer text, structured sources attached.
+        assert result == "Answer"
+        assert "Sources:" not in result
+        assert conversation.messages[-1].sources is not None
+        assert len(conversation.messages[-1].sources) == 1
+        assert conversation.messages[-1].sources[0].filename == "report.pdf"
+        assert conversation.messages[-1].sources[0].page_number == 3
+
+    def test_citations_omitted_when_confidence_below_threshold(self) -> None:
+        """With a threshold set and confidence below it, citations are omitted."""
+        provider = _make_mock_provider(chunks=["Answer"])
+        rag_chunk = _make_rag_chunk(
+            filename="report.pdf", page_number=3, score=0.2
+        )
+        rag_service = _make_rag_service(
+            _make_rag_result_with_chunks([rag_chunk])
+        )
+        service = ChatService(
+            provider=provider,
+            model="test-model",
+            rag_service=rag_service,
+            confidence_threshold=0.6,
+        )
+        conversation = Conversation()
+        result = service.send_message(conversation, "test query")
+
+        assert result == "Answer"
+        assert "Sources:" not in result
+        assert conversation.messages[-1].sources is None
+
+    def test_confidence_threshold_property(self) -> None:
+        """The confidence_threshold property should reflect the constructor arg."""
+        service = _make_service(confidence_threshold=0.7)
+        assert service.confidence_threshold == 0.7
+
+    def test_confidence_threshold_defaults_to_none(self) -> None:
+        """Without a threshold, confidence_threshold should be None."""
+        service = _make_service()
+        assert service.confidence_threshold is None

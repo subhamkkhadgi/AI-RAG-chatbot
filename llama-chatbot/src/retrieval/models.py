@@ -38,6 +38,25 @@ class RetrievedChunk(BaseModel):
     model_config = {"frozen": True}
 
 
+class DocumentScope(BaseModel):
+    """A selection of documents to restrict retrieval to.
+
+    Attributes:
+        document_ids: Unique document identifiers to restrict to.
+        filenames: Original filenames to restrict to.
+    """
+
+    document_ids: list[str] = Field(default_factory=list)
+    filenames: list[str] = Field(default_factory=list)
+
+    @property
+    def is_empty(self) -> bool:
+        """True when no documents are selected."""
+        return not self.document_ids and not self.filenames
+
+    model_config = {"frozen": True}
+
+
 class RetrievalResult(BaseModel):
     """The complete result of a retrieval query.
 

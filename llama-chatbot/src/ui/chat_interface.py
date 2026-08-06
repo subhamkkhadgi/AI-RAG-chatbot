@@ -178,6 +178,12 @@ def _build_chat_service() -> ChatService:
         temperature=temperature,
         max_tokens=max_tokens,
         rag_service=rag_service,
+        # Wire the configured retrieval confidence threshold into the
+        # ChatService so confidence-aware RAG gating is actually enforced
+        # in the running application (Sprint 9B.1). When the threshold is
+        # not configured, ChatService treats it as ``None`` (unset) and
+        # preserves the previous always-inject behaviour.
+        confidence_threshold=settings.retrieval_confidence_threshold,
     )
 
 
