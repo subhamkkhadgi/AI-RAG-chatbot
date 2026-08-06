@@ -19,7 +19,7 @@ from src.exceptions import (
     ProviderConnectionError,
     ProviderResponseError,
 )
-from src.models.chat import Conversation
+from src.models.chat import Conversation, SourceRef
 from src.providers.factory import create_provider
 from src.rag.context_builder import ContextBuilder
 from src.rag.rag_service import RAGService
@@ -111,6 +111,32 @@ def _display_chat_history() -> None:
                     display_content = parts[1]
             st.markdown(display_content)
 
+            # Render structured sources (assistant messages only) as an
+            # expandable card.
+            if msg.role.value == "assistant" and msg.sources:
+                _render_sources(msg.sources)
+
+
+def _render_sources(sources: list[SourceRef]) -> None:
+    """Render an expandable ``📚 Sources`` card for an assistant message.
+
+    Each source shows the document filename, the page number when
+    available, and a "Relevant excerpt" of the retrieved chunk text.
+
+    Internal metadata (``document_id``, ``chunk_index``, Qdrant point
+    IDs, similarity scores) is intentionally **not** shown to the user.
+    """
+    label = f"📚 {len(sources)} Sources"
+    with st.expander(label):
+        for i, src in enumerate(sources, start=1):
+            st.markdown(f"**{i}. {src.filename}**")
+            if src.page_number is not None:
+                st.caption(f"Page {src.page_number}")
+            if src.text:
+                st.markdown("> " + src.text)
+            if i < len(sources):
+                st.divider()
+
 
 def _build_chat_service() -> ChatService:
     """Create a new ``ChatService`` from current session state and settings."""
@@ -152,6 +178,12 @@ def _build_chat_service() -> ChatService:
         temperature=temperature,
         max_tokens=max_tokens,
         rag_service=rag_service,
+        # Wire the configured retrieval confidence threshold into the
+        # ChatService so confidence-aware RAG gating is actually enforced
+        # in the running application (Sprint 9B.1). When the threshold is
+        # not configured, ChatService treats it as ``None`` (unset) and
+        # preserves the previous always-inject behaviour.
+        confidence_threshold=settings.retrieval_confidence_threshold,
     )
 
 

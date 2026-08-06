@@ -285,12 +285,35 @@ class TestSearch:
         assert results[0]["score"] == 0.95
         assert results[0]["payload"] == {"text": "result 1"}
         assert results[1]["id"] == "def-456"
+        assert results[1]["score"] == 0.87
+        assert results[1]["payload"] == {"text": "result 2"}
 
         mock_client.query_points.assert_called_once_with(
             collection_name="documents",
             query=[0.1, 0.2],
             limit=2,
+            query_filter=None,
         )
+
+    def test_search_with_filter(self, mock_settings: object) -> None:
+        """search should forward the filter_dict as a Qdrant query filter."""
+        store = QdrantVectorStore(mock_settings)
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.points = []
+        mock_client.query_points.return_value = mock_response
+
+        with patch.object(store, "_get_client", return_value=mock_client):
+            results = store.search(
+                vector=[0.1, 0.2],
+                limit=5,
+                filter_dict={"document_id": "doc-1"},
+            )
+
+        assert results == []
+        call_kwargs = mock_client.query_points.call_args[1]
+        # The filter should be translated into a non-None Qdrant filter.
+        assert call_kwargs["query_filter"] is not None
 
     def test_search_error(self, mock_settings: object) -> None:
         """search should translate errors to ProviderResponseError."""

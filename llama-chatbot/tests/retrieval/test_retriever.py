@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.exceptions import ConfigurationError, ProviderResponseError
+from src.retrieval.models import DocumentScope
 from src.retrieval.retriever import DocumentRetriever
 
 
@@ -105,6 +106,7 @@ class TestSuccessfulRetrieval:
         mock_vector_store.search.assert_called_once_with(
             [0.1, 0.2, 0.3],
             limit=5,
+            filter_dict=None,
         )
 
     def test_result_score_preserved(
@@ -149,6 +151,7 @@ class TestSuccessfulRetrieval:
         mock_vector_store.search.assert_called_once_with(
             [0.1, 0.2, 0.3],
             limit=10,
+            filter_dict=None,
         )
 
 
@@ -247,3 +250,287 @@ class TestConstructorDefaults:
         """Properties should expose the injected dependencies."""
         assert retriever.embedding_provider is mock_embedding_provider
         assert retriever.vector_store is mock_vector_store
+
+
+# ======================================================================
+# Retrieval Precision Filters (Sprint 9A)
+# ======================================================================
+
+def _raw_result(
+    doc_id: str,
+    filename: str,
+    chunk_index: int,
+    score: float,
+    text: str = "Relevant content.",
+) -> dict:
+    """Build a raw vector-store result dict for precision-filter tests."""
+    return {
+        "id": f"point-{doc_id}-{chunk_index}",
+        "score": score,
+        "payload": {
+            "document_id": doc_id,
+            "filename": filename,
+            "chunk_index": chunk_index,
+            "text": text,
+            "page_number": None,
+            "created_at": "2025-01-01T00:00:00+00:00",
+        },
+    }
+
+
+class TestScoreThreshold:
+    """Similarity-threshold filtering of retrieved chunks."""
+
+    def test_high_relevance_chunks_returned(
+        self,
+        mock_embedding_provider: MagicMock,
+        mock_vector_store: MagicMock,
+    ) -> None:
+        """Chunks above the threshold are kept."""
+        mock_vector_store.search.return_value = [
+            _raw_result("doc-a", "a.pdf", 0, 0.9),
+            _raw_result("doc-a", "a.pdf", 1, 0.8),
+        ]
+        retriever = DocumentRetriever(
+            embedding_provider=mock_embedding_provider,
+            vector_store=mock_vector_store,
+            default_limit=10,
+            min_score=0.5,
+            max_documents=1,
+        )
+        result = retriever.retrieve("query")
+        assert result.total_results == 2
+        assert [c.score for c in result.chunks] == [0.9, 0.8]
+
+    def test_low_relevance_chunks_filtered(
+        self,
+        mock_embedding_provider: MagicMock,
+        mock_vector_store: MagicMock,
+    ) -> None:
+        """Chunks below the threshold are removed."""
+        mock_vector_store.search.return_value = [
+            _raw_result("doc-a", "a.pdf", 0, 0.9),
+            _raw_result("doc-a", "a.pdf", 1, 0.2),
+        ]
+        retriever = DocumentRetriever(
+            embedding_provider=mock_embedding_provider,
+            vector_store=mock_vector_store,
+            default_limit=10,
+            min_score=0.5,
+            max_documents=1,
+        )
+        result = retriever.retrieve("query")
+        assert result.total_results == 1
+        assert result.chunks[0].score == 0.9
+
+    def test_threshold_boundary_inclusive(
+        self,
+        mock_embedding_provider: MagicMock,
+        mock_vector_store: MagicMock,
+    ) -> None:
+        """A chunk exactly at the threshold is kept (>=)."""
+        mock_vector_store.search.return_value = [
+            _raw_result("doc-a", "a.pdf", 0, 0.5),
+        ]
+        retriever = DocumentRetriever(
+            embedding_provider=mock_embedding_provider,
+            vector_store=mock_vector_store,
+            default_limit=10,
+            min_score=0.5,
+            max_documents=1,
+        )
+        result = retriever.retrieve("query")
+        assert result.total_results == 1
+
+    def test_all_below_threshold_returns_empty(
+        self,
+        mock_embedding_provider: MagicMock,
+        mock_vector_store: MagicMock,
+    ) -> None:
+        """When no chunk passes the threshold, result is empty."""
+        mock_vector_store.search.return_value = [
+            _raw_result("doc-a", "a.pdf", 0, 0.2),
+            _raw_result("doc-b", "b.pdf", 0, 0.3),
+        ]
+        retriever = DocumentRetriever(
+            embedding_provider=mock_embedding_provider,
+            vector_store=mock_vector_store,
+            default_limit=10,
+            min_score=0.9,
+            max_documents=1,
+        )
+        result = retriever.retrieve("query")
+        assert result.total_results == 0
+        assert result.chunks == []
+
+
+class TestDocumentCap:
+    """Document-level filtering to prevent cross-document false positives."""
+
+    def test_multiple_documents_only_relevant_returned(
+        self,
+        mock_embedding_provider: MagicMock,
+        mock_vector_store: MagicMock,
+    ) -> None:
+        """Only chunks from the highest-relevance document are returned."""
+        mock_vector_store.search.return_value = [
+            _raw_result("cv", "Subham_khadgi_CV.pdf", 0, 0.9),
+            _raw_result("proposal", "Web_Proposal.pdf", 0, 0.6),
+            _raw_result("proposal", "Web_Proposal.pdf", 1, 0.55),
+        ]
+        retriever = DocumentRetriever(
+            embedding_provider=mock_embedding_provider,
+            vector_store=mock_vector_store,
+            default_limit=10,
+            min_score=0.0,
+            max_documents=1,
+        )
+        result = retriever.retrieve("Who is Subham?")
+        assert result.total_results == 1
+        assert result.chunks[0].filename == "Subham_khadgi_CV.pdf"
+
+    def test_unrelated_documents_excluded(
+        self,
+        mock_embedding_provider: MagicMock,
+        mock_vector_store: MagicMock,
+    ) -> None:
+        """The highest-scoring document wins; unrelated docs are excluded."""
+        mock_vector_store.search.return_value = [
+            _raw_result("cv", "Subham_khadgi_CV.pdf", 0, 0.7),
+            _raw_result("proposal", "Web_Proposal.pdf", 0, 0.95),
+            _raw_result("proposal", "Web_Proposal.pdf", 1, 0.9),
+        ]
+        retriever = DocumentRetriever(
+            embedding_provider=mock_embedding_provider,
+            vector_store=mock_vector_store,
+            default_limit=10,
+            min_score=0.0,
+            max_documents=1,
+        )
+        result = retriever.retrieve("Web application")
+        assert result.total_results == 2
+        filenames = {c.filename for c in result.chunks}
+        assert filenames == {"Web_Proposal.pdf"}
+
+    def test_document_cap_keeps_top_n_documents(
+        self,
+        mock_embedding_provider: MagicMock,
+        mock_vector_store: MagicMock,
+    ) -> None:
+        """With max_documents=2, the top two documents are kept."""
+        mock_vector_store.search.return_value = [
+            _raw_result("doc-a", "a.pdf", 0, 0.9),
+            _raw_result("doc-b", "b.pdf", 0, 0.8),
+            _raw_result("doc-c", "c.pdf", 0, 0.7),
+        ]
+        retriever = DocumentRetriever(
+            embedding_provider=mock_embedding_provider,
+            vector_store=mock_vector_store,
+            default_limit=10,
+            min_score=0.0,
+            max_documents=2,
+        )
+        result = retriever.retrieve("query")
+        assert result.total_results == 2
+        filenames = {c.filename for c in result.chunks}
+        assert filenames == {"a.pdf", "b.pdf"}
+
+
+class TestPrecisionProperties:
+    """Expose the configured precision settings."""
+
+    def test_min_score_property(
+        self,
+        mock_embedding_provider: MagicMock,
+        mock_vector_store: MagicMock,
+    ) -> None:
+        retriever = DocumentRetriever(
+            embedding_provider=mock_embedding_provider,
+            vector_store=mock_vector_store,
+            min_score=0.6,
+            max_documents=1,
+        )
+        assert retriever.min_score == 0.6
+        assert retriever.max_documents == 1
+
+    def test_defaults_from_settings(
+        self,
+        mock_embedding_provider: MagicMock,
+        mock_vector_store: MagicMock,
+    ) -> None:
+        """Without explicit values, settings defaults are used."""
+        from src.config import get_settings
+
+        retriever = DocumentRetriever(
+            embedding_provider=mock_embedding_provider,
+            vector_store=mock_vector_store,
+        )
+        settings = get_settings()
+        assert retriever.min_score == settings.retrieval_min_score
+        assert retriever.max_documents == settings.retrieval_max_documents
+
+
+# ======================================================================
+# Document Scope (Sprint 9C)
+# ======================================================================
+class TestDocumentScope:
+    """Scoped retrieval restricted to specific documents."""
+
+    def test_scope_passes_filter_dict(
+        self,
+        retriever: DocumentRetriever,
+        mock_vector_store: MagicMock,
+    ) -> None:
+        """A single-document scope should be passed as a filter dict."""
+        scope = DocumentScope(document_ids=["doc-1"])
+        retriever.retrieve("test query", scope=scope)
+        mock_vector_store.search.assert_called_once_with(
+            [0.1, 0.2, 0.3],
+            limit=10,
+            filter_dict={"document_id": "doc-1"},
+        )
+
+    def test_none_scope_no_filter(self, retriever: DocumentRetriever) -> None:
+        """No scope means unrestricted search (filter_dict=None)."""
+        req = [0.1, 0.2, 0.3]
+        retriever.retrieve("test query")
+        retriever._vector_store.search.assert_called_once_with(
+            req, limit=10, filter_dict=None
+        )
+
+    def test_scope_guard_filters_outside_documents(
+        self,
+        mock_embedding_provider: MagicMock,
+        mock_vector_store: MagicMock,
+    ) -> None:
+        """Chunks from unselected documents are dropped post-search."""
+        mock_vector_store.search.return_value = [
+            _raw_result("doc-1", "a.pdf", 0, 0.9),
+            _raw_result("doc-2", "b.pdf", 0, 0.8),
+        ]
+        retriever = DocumentRetriever(
+            embedding_provider=mock_embedding_provider,
+            vector_store=mock_vector_store,
+            default_limit=10,
+            min_score=0.0,
+            max_documents=0,
+        )
+        scope = DocumentScope(document_ids=["doc-1"])
+        result = retriever.retrieve("query", scope=scope)
+        assert result.total_results == 1
+        assert result.chunks[0].document_id == "doc-1"
+
+    def test_empty_scope_unrestricted(
+        self,
+        retriever: DocumentRetriever,
+        mock_vector_store: MagicMock,
+    ) -> None:
+        """An empty scope behaves like no scope (no filter, no guard)."""
+        scope = DocumentScope()
+        result = retriever.retrieve("test query", scope=scope)
+        assert result.total_results == 2
+        mock_vector_store.search.assert_called_once_with(
+            [0.1, 0.2, 0.3],
+            limit=10,
+            filter_dict=None,
+        )

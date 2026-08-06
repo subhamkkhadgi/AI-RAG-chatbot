@@ -188,6 +188,7 @@ class QdrantVectorStore(BaseVectorStore):
         self,
         vector: list[float],
         limit: int = 10,
+        filter_dict: dict | None = None,
     ) -> list[dict]:
         """Search for the nearest neighbours of a query vector.
 
@@ -197,6 +198,9 @@ class QdrantVectorStore(BaseVectorStore):
             The query vector to search with.
         limit:
             Maximum number of results to return.
+        filter_dict:
+            Optional payload filter to narrow results (e.g. restrict to
+            specific ``document_id`` values).  ``None`` means unrestricted.
 
         Returns
         -------
@@ -207,10 +211,22 @@ class QdrantVectorStore(BaseVectorStore):
         client = self._get_client()
 
         try:
+            query_filter = None
+            if filter_dict:
+                conditions = [
+                    qdrant_models.FieldCondition(
+                        key=key,
+                        match=qdrant_models.MatchValue(value=value),
+                    )
+                    for key, value in filter_dict.items()
+                ]
+                query_filter = qdrant_models.Filter(must=conditions)
+
             response = client.query_points(
                 collection_name=self._collection,
                 query=vector,
                 limit=limit,
+                query_filter=query_filter,
             )
             results = response.points
         except Exception as exc:

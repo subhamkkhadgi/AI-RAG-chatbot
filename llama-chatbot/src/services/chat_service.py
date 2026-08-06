@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from src.exceptions import (
     ChatbotError,
@@ -27,9 +27,13 @@ from src.exceptions import (
     ProviderConnectionError,
     ProviderResponseError,
 )
-from src.models.chat import ChatRequest, Conversation
+from src.models.chat import ChatRequest, Conversation, SourceRef
 from src.prompts.system_prompts import get_default_prompt
 from src.providers.base import BaseLLMProvider
+from src.rag.citations import build_citations_section, build_source_refs
+from src.rag.confidence import is_confident
+from src.rag.evidence import filter_supporting_chunks
+from src.services.response_formatter import strip_attribution
 
 if TYPE_CHECKING:
     from src.rag.rag_service import RAGService
@@ -59,7 +63,13 @@ class ChatService:
     rag_service:
         Optional ``RAGService`` instance for retrieval-augmented generation.
         When provided, retrieved document context is prepended to the user
-        message before sending to the LLM.
+        message before sending to the LLM (only when retrieval confidence
+        meets :attr:`confidence_threshold`).
+    confidence_threshold:
+        Optional minimum retrieval confidence (highest chunk similarity
+        score) required to inject retrieved context into the prompt.
+        ``None`` restores the pre-Sprint-9B behaviour — retrieved context
+        is always injected when available.
     """
 
     def __init__(
@@ -70,6 +80,7 @@ class ChatService:
         temperature: float = 0.7,
         max_tokens: int = 2048,
         rag_service: RAGService | None = None,
+        confidence_threshold: float | None = None,
     ) -> None:
         if not isinstance(provider, BaseLLMProvider):
             raise TypeError(
@@ -81,6 +92,16 @@ class ChatService:
         self._temperature: float = temperature
         self._max_tokens: int = max_tokens
         self._rag_service: RAGService | None = rag_service
+        #: Minimum retrieval confidence required to use retrieved context.
+        self._confidence_threshold: float | None = confidence_threshold
+        #: The most recent ``RAGResult`` captured during RAG enrichment.
+        #: ``None`` when RAG is disabled, failed, or not yet run.  Retained
+        #: for internal debugging / RAG evaluation (document_id, chunk_index,
+        #: score, page_number, filename).
+        self._last_rag_result: Any = None
+        #: Whether the most recent RAG context was actually injected into
+        #: the prompt.  ``False`` when the context failed confidence gating.
+        self._last_context_injected: bool = False
 
     # ------------------------------------------------------------------
     # Properties
@@ -111,6 +132,22 @@ class ChatService:
         not enabled."""
         return self._rag_service
 
+    @property
+    def confidence_threshold(self) -> float | None:
+        """The minimum retrieval confidence required to use retrieved context."""
+        return self._confidence_threshold
+
+    @property
+    def last_rag_result(self) -> Any:
+        """The most recent ``RAGResult`` captured during RAG enrichment.
+
+        Returns ``None`` when RAG is disabled, failed, or not yet run.
+        The result preserves full retrieval metadata (``document_id``,
+        ``filename``, ``chunk_index``, ``page_number``, ``score``) for
+        internal debugging / RAG evaluation.
+        """
+        return self._last_rag_result
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -124,7 +161,8 @@ class ChatService:
         3. Adds the user message to *conversation*.
         4. Creates a ``ChatRequest`` with the current settings.
         5. Calls ``provider.chat(request)`` and collects all chunks.
-        6. Adds the assistant message to *conversation*.
+        6. Adds the assistant message (with structured sources, if any)
+           to *conversation*.
         7. Returns the combined response text.
 
         Parameters
@@ -179,10 +217,18 @@ class ChatService:
                 safe_message="An unexpected error occurred while generating a response.",
             ) from exc
 
-        # 5. Add assistant message
-        conversation.add_assistant_message(full_response)
+# 5. Append backend-generated citations (from retrieved metadata)
+        final_response, sources = self._build_cited_response(full_response)
 
-        return full_response
+        # 6. Clean retrieval-style attribution wording from the displayed
+        #    answer.  Applied after citation processing so citation filtering
+        #    still sees the original raw answer.
+        final_response = strip_attribution(final_response)
+
+        # 7. Add assistant message (with structured sources when present)
+        conversation.add_assistant_message(final_response, sources=sources)
+
+        return final_response
 
     def stream_message(self, conversation: Conversation, content: str) -> Iterator[str]:
         """Send a user message and yield response chunks as they arrive.
@@ -249,8 +295,16 @@ class ChatService:
                 safe_message="An unexpected error occurred while generating a response.",
             ) from exc
 
-        # 5. Add assistant message after streaming completes
-        conversation.add_assistant_message(full_response)
+# 5. Append backend-generated citations (from retrieved metadata)
+        final_response, sources = self._build_cited_response(full_response)
+
+        # 6. Clean retrieval-style attribution wording from the displayed
+        #    answer.  Applied after citation processing so citation filtering
+        #    still sees the original raw answer.
+        final_response = strip_attribution(final_response)
+
+        # 7. Add assistant message after streaming completes
+        conversation.add_assistant_message(final_response, sources=sources)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -290,27 +344,120 @@ class ChatService:
         Returns
         -------
         str
-            The enriched message (with context) if RAG is enabled, or
+            The enriched message (with context) if RAG is enabled and the
+            retrieval confidence meets :attr:`confidence_threshold`, or
             the original message if not.
         """
         if self._rag_service is None:
+            self._last_rag_result = None
+            self._last_context_injected = False
             return content
 
         try:
             rag_result = self._rag_service.query(content)
-            if rag_result.context:
-                return _RAG_CONTEXT_TEMPLATE.format(
-                    context=rag_result.context,
-                    query=content.strip(),
-                )
+            self._last_rag_result = rag_result
+            # Confidence-aware RAG: only inject context when the retrieval
+            # confidence meets the configured threshold.  When confidence
+            # cannot be determined (e.g. mock results in tests) we fall
+            # back to the previous behaviour so existing flows are preserved.
+            retrieval_result = getattr(rag_result, "retrieval_result", None)
+            if retrieval_result is not None and is_confident(
+                retrieval_result, self._confidence_threshold
+            ):
+                self._last_context_injected = True
+                if rag_result.context:
+                    return _RAG_CONTEXT_TEMPLATE.format(
+                        context=rag_result.context,
+                        query=content.strip(),
+                    )
+            else:
+                self._last_context_injected = False
         except ChatbotError:
+            self._last_rag_result = None
+            self._last_context_injected = False
             logger.warning("RAG query failed, falling back to original message")
         except Exception as exc:
+            self._last_rag_result = None
+            self._last_context_injected = False
             logger.warning(
                 "Unexpected error during RAG query: %s", exc, exc_info=True
             )
 
         return content
+
+    def _build_cited_response(
+        self,
+        response: str,
+    ) -> tuple[str, list[SourceRef] | None]:
+        """Build the assistant response text and structured sources.
+
+        The structured sources are derived from the metadata of the most
+        recent RAG retrieval (filename + optional page number) — **not**
+        from the LLM output.  The structured ``sources`` are returned so
+        the UI can render them as the expandable Sources card.  The
+        plain-text ``Sources:`` block is intentionally **not** appended to
+        the response text so citations are not displayed twice.
+
+        Sources are omitted when:
+        - RAG is disabled (``rag_service`` is ``None``)
+        - the RAG query failed
+        - retrieval returned no chunks
+        - no retrieved chunk lexically supports the generated answer
+        - the retrieval confidence fell below :attr:`confidence_threshold`
+          (context was not injected into the prompt)
+
+        Internal metadata (``document_id``, ``chunk_index``, Qdrant point
+        IDs, similarity scores) is intentionally not shown to the user.
+
+        Parameters
+        ----------
+        response:
+            The raw LLM response text.
+
+        Returns
+        -------
+        tuple[str, list[SourceRef] | None]
+            A ``(text, sources)`` pair.  ``text`` is the raw response text
+            unchanged.  ``sources`` is the structured list of source refs
+            (with chunk text and score kept internally), or ``None`` when
+            no usable chunks exist.
+        """
+        rag_result = self._last_rag_result
+        if rag_result is None:
+            return response, None
+
+        retrieval_result = getattr(rag_result, "retrieval_result", None)
+        if retrieval_result is None:
+            return response, None
+
+        # Only cite sources when the retrieved context was actually injected
+        # into the prompt (i.e. it passed the confidence gate).  When the
+        # context was gated out, the LLM answered without retrieval and we
+        # must not show citations for it.
+        if not self._last_context_injected:
+            return response, None
+
+        chunks = getattr(retrieval_result, "chunks", None)
+
+        # Answer-aware citation filtering: keep only the retrieved chunks
+        # that lexically support the generated answer.  Chunks that do not
+        # support the answer are removed from the citation set.  This is a
+        # provider-neutral, lexical layer (no embeddings, no extra LLM call).
+        supporting_chunks = filter_supporting_chunks(response, chunks)
+
+        sources = build_source_refs(supporting_chunks)
+        if not sources:
+            return response, None
+
+        # The plain-text Sources block is not appended to the response
+        # content.  The structured ``sources`` metadata is attached
+        # separately and rendered by the UI as the expandable Sources card,
+        # so citations appear exactly once.
+        citations = build_citations_section(supporting_chunks)
+        if not citations:
+            return response, sources
+
+        return response, sources
 
     def _build_request(self, conversation: Conversation) -> ChatRequest:
         """Build a ``ChatRequest`` from the conversation and current settings.
