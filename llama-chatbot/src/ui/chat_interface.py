@@ -93,10 +93,10 @@ def render_chat_interface() -> None:
 def _display_chat_history() -> None:
     """Render all messages from the conversation using ``st.chat_message``.
 
-    The enriched RAG context (``Relevant context: ...``) is stripped from
-    user messages for display purposes only — the conversation history
-    stored in session state is not modified, and the LLM continues to
-    receive the full enriched context.
+    The enriched RAG context (the ``<retrieved_context>`` block) is
+    stripped from user messages for display purposes only — the
+    conversation history stored in session state is not modified, and the
+    LLM continues to receive the full enriched context.
     """
     conversation: Conversation = st.session_state.get(CONVERSATION_KEY, Conversation())
 
@@ -104,7 +104,7 @@ def _display_chat_history() -> None:
         with st.chat_message(msg.role.value):
             display_content = msg.content
             # Strip RAG context from user messages for display only
-            if msg.role.value == "user" and "Relevant context:\n" in display_content:
+            if msg.role.value == "user" and "<retrieved_context>" in display_content:
                 # Extract only the original question after "...\n\nQuestion:\n"
                 parts = display_content.split("\n\nQuestion:\n", 1)
                 if len(parts) == 2:

@@ -21,10 +21,13 @@ classes, or vector stores.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Final
 
 from src.retrieval.models import RetrievedChunk
+
+logger = logging.getLogger(__name__)
 
 #: Default minimum fraction of the answer's unique tokens that must appear
 #: in a chunk for that chunk to be considered supporting.
@@ -145,8 +148,25 @@ def filter_supporting_chunks(
         chunk_text = getattr(chunk, "text", "") or ""
         chunk_tokens = _tokenize(chunk_text)
         if not chunk_tokens:
+            logger.debug(
+                "RAG_DIAG[evidence] chunk skipped (no tokens) | answer_tokens=%r "
+                "filename=%r overlap_score=None accepted=False",
+                sorted(answer_tokens),
+                getattr(chunk, "filename", ""),
+            )
             continue
-        if _overlap_ratio(answer_tokens, chunk_tokens) >= min_overlap:
+        overlap = _overlap_ratio(answer_tokens, chunk_tokens)
+        accepted = overlap >= min_overlap
+        logger.debug(
+            "RAG_DIAG[evidence] chunk evaluated | answer_tokens=%r filename=%r "
+            "overlap_score=%.4f min_overlap=%.4f accepted=%s",
+            sorted(answer_tokens),
+            getattr(chunk, "filename", ""),
+            overlap,
+            min_overlap,
+            accepted,
+        )
+        if accepted:
             supporting.append(chunk)
 
     return supporting

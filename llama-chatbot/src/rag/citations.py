@@ -16,10 +16,13 @@ Qdrant point IDs, similarity scores) are intentionally **not** emitted.
 
 from __future__ import annotations
 
+import logging
 from typing import Final
 
 from src.models.chat import SourceRef
 from src.retrieval.models import RetrievedChunk
+
+logger = logging.getLogger(__name__)
 
 #: Header line for the citations block.
 _CITATIONS_HEADER: Final[str] = "\n\nSources:"
@@ -98,12 +101,24 @@ def build_source_refs(
     for chunk in chunks:
         filename = getattr(chunk, "filename", "") or ""
         if not filename:
+            logger.debug(
+                "RAG_DIAG[citations] source_ref skipped | reason=empty_filename "
+                "filename=%r page_number=%r created=False",
+                filename,
+                getattr(chunk, "page_number", None),
+            )
             continue
 
         page_number = getattr(chunk, "page_number", None)
 
         key = (filename, page_number)
         if key in seen:
+            logger.debug(
+                "RAG_DIAG[citations] source_ref skipped | reason=duplicate "
+                "filename=%r page_number=%r created=False",
+                filename,
+                page_number,
+            )
             continue
         seen.add(key)
 
@@ -114,6 +129,11 @@ def build_source_refs(
                 text=getattr(chunk, "text", None),
                 score=getattr(chunk, "score", None),
             )
+        )
+        logger.debug(
+            "RAG_DIAG[citations] source_ref created | filename=%r page_number=%r created=True",
+            filename,
+            page_number,
         )
 
     return refs

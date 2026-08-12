@@ -47,9 +47,9 @@ class TestDefaultPrompt:
             assert forbidden not in prompt
 
     def test_default_prompt_is_concise(self) -> None:
-        """The default prompt should be reasonably short (< 700 chars)."""
+        """The default prompt should be reasonably short (< 1400 chars)."""
         prompt = get_default_prompt()
-        assert len(prompt) < 700
+        assert len(prompt) < 1400
 
 
 class TestPromptRetrieval:

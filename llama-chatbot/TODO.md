@@ -1,11 +1,10 @@
-# Answer-Aware Citation Filtering — Task Tracking
+# Implementation Plan: Contextual Follow-up Retrieval
 
 ## Steps
-- [x] Create `src/rag/evidence.py` with lexical supporting-chunk filtering
-- [x] Modify `src/services/chat_service.py` to filter chunks before building citations
-- [x] Add `tests/rag/test_evidence.py`
-- [x] Update existing citation tests in `tests/services/test_chat_service.py`
-- [x] Fix stopword filtering so common words don't inflate overlap
-- [x] Fix scoring direction to answer coverage (chunk rejected was valid)
-- [x] Add answer-coverage tests (long supporting chunk retained, unsupported page removed)
-- [x] Run `python -m pytest -q` — 317 passed
+- [ ] 1. Inspect current `_enrich_with_context` and call sites (done in prior investigation).
+- [ ] 2. Add pure helper `build_retrieval_query(content, conversation)` in `chat_service.py`.
+- [ ] 3. Thread `conversation` into `_enrich_with_context` from `send_message` and `stream_message`.
+- [ ] 4. Use the helper to build the retrieval query; keep stored user message unchanged.
+- [ ] 5. Add focused tests in `tests/services/test_chat_service.py`.
+- [ ] 6. Run targeted ChatService tests.
+- [ ] 7. Run the complete test suite.

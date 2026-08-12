@@ -21,7 +21,7 @@ from src.prompts.system_prompts import get_default_prompt
 from src.providers.base import BaseLLMProvider
 from src.rag.rag_service import RAGResult
 from src.retrieval.models import RetrievedChunk, RetrievalResult
-from src.services.chat_service import ChatService
+from src.services.chat_service import ChatService, build_retrieval_query
 
 
 # ======================================================================
@@ -501,7 +501,8 @@ class TestRAGSendMessage:
         service.send_message(conversation, "test query")
 
         user_msg = conversation.messages[0]
-        assert "Relevant context:" in user_msg.content
+        assert "<retrieved_context>" in user_msg.content
+        assert "</retrieved_context>" in user_msg.content
         assert "Document context." in user_msg.content
         assert "Question:" in user_msg.content
         assert "test query" in user_msg.content
@@ -1030,3 +1031,278 @@ class TestConfidenceGatedCitations:
         """Without a threshold, confidence_threshold should be None."""
         service = _make_service()
         assert service.confidence_threshold is None
+
+
+# ======================================================================
+# Contextual Follow-up Retrieval
+# ======================================================================
+
+def _conv_with_prior_user(previous_question: str) -> Conversation:
+    """Build a conversation with one previous user question."""
+    conv = Conversation()
+    conv.add_user_message(previous_question)
+    return conv
+
+
+class TestBuildRetrievalQuery:
+    """build_retrieval_query contextualizes only generic referential
+    follow-ups and never touches prior messages."""
+
+    def test_first_turn_explicit_query_unchanged(self) -> None:
+        """A standalone explicit question is returned byte-for-byte."""
+        question = "What technologies are used in Outdoor Gear Hub?"
+        assert build_retrieval_query(question, None) == question
+
+    def test_first_turn_generic_query_unchanged(self) -> None:
+        """A generic query stays unchanged when there is no prior user
+        question."""
+        question = "technologies used"
+        assert build_retrieval_query(question, Conversation()) == question
+
+    def test_explicit_self_contained_query_unchanged(self) -> None:
+        """An explicit question is unchanged even with prior context."""
+        conv = _conv_with_prior_user("What technologies are used in TES?")
+        question = "What technologies are used in Outdoor Gear Hub?"
+        assert build_retrieval_query(question, conv) == question
+
+    def test_generic_followup_after_ogh_contextualized(self) -> None:
+        """'What technologies are used?' after Outdoor Gear Hub gets the
+        topic context while preserving the current question."""
+        conv = _conv_with_prior_user(
+            "What technologies are used in Outdoor Gear Hub?"
+        )
+        query = build_retrieval_query("What technologies are used?", conv)
+        assert "Outdoor Gear Hub" in query
+        assert "What technologies are used?" in query
+
+    def test_generic_followup_after_tes_contextualized(self) -> None:
+        """'technologies used' after TES gets the TES topic context."""
+        conv = _conv_with_prior_user("What technologies are used in TES?")
+        query = build_retrieval_query("technologies used", conv)
+        assert "TES" in query
+        assert "technologies used" in query
+
+    def test_technologies_used_recognized_as_generic_followup(self) -> None:
+        """A bare two-word topic query is treated as a generic follow-up
+        when prior context exists."""
+        conv = _conv_with_prior_user(
+            "What technologies are used in Outdoor Gear Hub?"
+        )
+        query = build_retrieval_query("technologies used", conv)
+        assert "Outdoor Gear Hub" in query
+        assert "technologies used" in query
+
+    def test_previous_user_question_used_as_context(self) -> None:
+        """The most recent previous USER question supplies the context."""
+        conv = _conv_with_prior_user("What is the capital of France?")
+        conv.add_assistant_message("Paris is the capital of France.")
+        query = build_retrieval_query("what is its population?", conv)
+        assert "capital of France" in query
+        assert "Paris" not in query
+
+    def test_assistant_answers_not_used_as_context(self) -> None:
+        """Assistant answers alone never provide retrieval context."""
+        conv = Conversation()
+        conv.add_assistant_message("The budget is allocated to the team.")
+        assert build_retrieval_query("technologies used", conv) == (
+            "technologies used"
+        )
+
+    def test_unrelated_self_contained_second_question_unchanged(self) -> None:
+        """A clearly unrelated, self-contained follow-up is unchanged."""
+        conv = _conv_with_prior_user("What technologies are used in TES?")
+        question = "What is the customer service contact information?"
+        assert build_retrieval_query(question, conv) == question
+
+    def test_build_query_never_modifies_conversation(self) -> None:
+        """build_retrieval_query never mutates the conversation."""
+        conv = _conv_with_prior_user(
+            "What technologies are used in Outdoor Gear Hub?"
+        )
+        conv.add_assistant_message("Outdoor Gear Hub uses React and Python.")
+        before = [(m.role, m.content) for m in conv.messages]
+        build_retrieval_query("technologies used", conv)
+        after = [(m.role, m.content) for m in conv.messages]
+        assert before == after
+
+
+class TestContextualizedQuerySentToRAG:
+    """send_message and stream_message pass the contextualized query to
+    RAG for an ambiguous follow-up."""
+
+    def test_send_message_sends_contextualized_query(self) -> None:
+        provider = _make_mock_provider(chunks=["Outdoor Gear Hub uses React."])
+        rag_chunk = _make_rag_chunk(
+            text="Outdoor Gear Hub uses React and Python."
+        )
+        rag_service = _make_rag_service(
+            _make_rag_result_with_chunks([rag_chunk])
+        )
+        service = ChatService(
+            provider=provider, model="test-model", rag_service=rag_service
+        )
+        conversation = _conv_with_prior_user(
+            "What technologies are used in Outdoor Gear Hub?"
+        )
+        service.send_message(conversation, "What technologies are used?")
+
+        sent_query = rag_service.query.call_args[0][0]
+        assert "Outdoor Gear Hub" in sent_query
+        assert "What technologies are used?" in sent_query
+
+    def test_stream_message_sends_contextualized_query(self) -> None:
+        provider = _make_mock_provider(chunks=["Outdoor Gear Hub uses React."])
+        rag_chunk = _make_rag_chunk(
+            text="Outdoor Gear Hub uses React and Python."
+        )
+        rag_service = _make_rag_service(
+            _make_rag_result_with_chunks([rag_chunk])
+        )
+        service = ChatService(
+            provider=provider, model="test-model", rag_service=rag_service
+        )
+        conversation = _conv_with_prior_user(
+            "What technologies are used in Outdoor Gear Hub?"
+        )
+        list(service.stream_message(conversation, "What technologies are used?"))
+
+        sent_query = rag_service.query.call_args[0][0]
+        assert "Outdoor Gear Hub" in sent_query
+        assert "What technologies are used?" in sent_query
+
+    def test_original_current_message_unchanged_in_conversation(self) -> None:
+        """The stored user message keeps the original current text, not the
+        contextualized retrieval query."""
+        provider = _make_mock_provider(chunks=["Outdoor Gear Hub uses React."])
+        rag_chunk = _make_rag_chunk(
+            text="Outdoor Gear Hub uses React and Python."
+        )
+        rag_service = _make_rag_service(
+            _make_rag_result_with_chunks([rag_chunk])
+        )
+        service = ChatService(
+            provider=provider, model="test-model", rag_service=rag_service
+        )
+        conversation = _conv_with_prior_user(
+            "What technologies are used in Outdoor Gear Hub?"
+        )
+        follow_up = "What technologies are used?"
+        service.send_message(conversation, follow_up)
+
+        user_msgs = [m for m in conversation.messages if m.role == ChatRole.USER]
+        stored = user_msgs[-1].content
+        assert follow_up in stored
+        # The contextualized composition must not replace the stored query.
+        assert (
+            "What technologies are used in Outdoor Gear Hub? \u2014 "
+            "What technologies are used?"
+        ) not in stored
+
+
+class TestEnrichedPreviousMessageRecovery:
+    """Regression: the previous enriched USER message is recovered to the
+    ORIGINAL question for contextualized retrieval, while the stored enriched
+    message is left unchanged."""
+
+    def test_real_production_path_tes_followup_not_polluted(self) -> None:
+        turn1 = "What are the technologies used in TES?"
+        turn2 = "technologies used"
+        provider = _make_mock_provider(chunks=["TES uses JWT and OAuth2."])
+        rag_chunk = _make_rag_chunk(
+            filename="report.pdf",
+            page_number=3,
+            text="TES uses JWT and OAuth2.",
+        )
+        rag_service = _make_rag_service(
+            _make_rag_result_with_chunks([rag_chunk])
+        )
+        service = ChatService(
+            provider=provider, model="test-model", rag_service=rag_service
+        )
+        conversation = Conversation()
+
+        # Turn 1 through the real flow stores the ENRICHED user message.
+        service.send_message(conversation, turn1)
+
+        # Confirm the stored turn-1 user message is the enriched form.
+        stored_turn1 = conversation.messages[0].content
+        assert "<retrieved_context>" in stored_turn1
+        assert "TES" in stored_turn1
+
+        # Turn 2 generic follow-up.
+        service.send_message(conversation, turn2)
+        sent_query = rag_service.query.call_args[0][0]
+
+        # Turn-2 query must contain the clean original first question.
+        assert turn1 in sent_query
+        # And must NOT contain the previous <retrieved_context> block.
+        assert "<retrieved_context>" not in sent_query
+        # The stored enriched message remains unchanged.
+        assert conversation.messages[0].content == stored_turn1
+
+    def test_real_production_path_stream_tes_followup_not_polluted(self) -> None:
+        turn1 = "What are the technologies used in TES?"
+        turn2 = "technologies used"
+        provider = _make_mock_provider(chunks=["TES uses JWT and OAuth2."])
+        rag_chunk = _make_rag_chunk(
+            filename="report.pdf",
+            page_number=3,
+            text="TES uses JWT and OAuth2.",
+        )
+        rag_service = _make_rag_service(
+            _make_rag_result_with_chunks([rag_chunk])
+        )
+        service = ChatService(
+            provider=provider, model="test-model", rag_service=rag_service
+        )
+        conversation = Conversation()
+
+        list(service.stream_message(conversation, turn1))
+
+        stored_turn1 = conversation.messages[0].content
+        assert "<retrieved_context>" in stored_turn1
+
+        list(service.stream_message(conversation, turn2))
+        sent_query = rag_service.query.call_args[0][0]
+
+        assert turn1 in sent_query
+        assert "<retrieved_context>" not in sent_query
+        assert conversation.messages[0].content == stored_turn1
+
+
+class TestContextualizedFollowupCitation:
+    """Regression: a contextualized follow-up must retrieve the relevant
+    supporting chunk and produce a SourceRef through the existing citation
+    pipeline (no lexical support, weakened thresholds or mocked results)."""
+
+    def test_tes_followup_retrieves_supporting_chunk(self) -> None:
+        answer = "TES uses JWT and OAuth2."
+        provider = _make_mock_provider(chunks=[answer])
+        rag_chunk = _make_rag_chunk(
+            filename="report.pdf",
+            page_number=3,
+            text=answer,
+        )
+        rag_service = _make_rag_service(
+            _make_rag_result_with_chunks([rag_chunk])
+        )
+        service = ChatService(
+            provider=provider, model="test-model", rag_service=rag_service
+        )
+        conversation = Conversation()
+
+        service.send_message(conversation, "What are the technologies used in TES?")
+        service.send_message(conversation, "technologies used")
+
+        # The ambiguous follow-up was contextualized with the clean original
+        # first question, not the previous <retrieved_context> block.
+        sent_query = rag_service.query.call_args[0][0]
+        assert "What are the technologies used in TES?" in sent_query
+        assert "<retrieved_context>" not in sent_query
+        # The supporting chunk passed through the existing citation pipeline
+        # and produced a structured SourceRef.
+        assistant = conversation.messages[-1]
+        assert assistant.sources is not None
+        assert len(assistant.sources) == 1
+        assert assistant.sources[0].filename == "report.pdf"
+        assert assistant.sources[0].page_number == 3

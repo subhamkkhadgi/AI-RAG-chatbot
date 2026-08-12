@@ -235,67 +235,6 @@ def normalize_whitespace(text: str) -> str:
 _BROKEN_LIST_RE: Final[Pattern[str]] = re.compile(r"(?<=[A-Za-z])(\d+\.\s)")
 
 
-#: Validates a single uppercase Roman numeral in the range 1..3999.  This is
-#: intentionally strict (not a loose ``[IVXLCDM]+`` run) so that ordinary text
-#: made of those letters (e.g. "VI. Let's", "IL.") is never mistaken for a
-#: list marker.
-_ROMAN_NUMERAL_RE: Final[Pattern[str]] = re.compile(
-    r"^(?=[MDCLXVI])M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$"
-)
-
-#: Locates every candidate Roman-list marker (``I.``, ``IV.``, ``XII.`` ...)
-#: anywhere on a line.  The leading ``\b`` prevents matching a numeral that is
-#: part of a longer word (e.g. the ``I`` in ``VII`` or ``DIV``).
-_ROMAN_LIST_MARKER_RE: Final[Pattern[str]] = re.compile(r"\b([IVXLCDM]+)\.")
-
-
-def _is_roman_numeral(candidate: str) -> bool:
-    """Return True if *candidate* is a valid uppercase Roman numeral (1..3999)."""
-    return _ROMAN_NUMERAL_RE.match(candidate) is not None
-
-
-def _fix_broken_roman_lists(line: str) -> str:
-    """Restore obvious lost line breaks before inline Roman-list markers.
-
-    A line is treated as a malformed inline Roman list **only** when all three
-    conditions hold:
-    - it contains at least two valid Roman-numeral markers, **and**
-    - at least one marker directly follows a period+whitespace (``. ``), which
-      is the strong signal that a previous list item ended mid-line, **and**
-    - the markers are not inside a fenced code block (handled by the caller).
-
-    A line break is then inserted before every marker that follows a
-    period+whitespace.  This is conservative:
-    - ``Chapter I.``, ``Version II.``, ``Section III.`` are untouched because
-      their markers follow a word, not a period.
-    - A single marker, or markers that do not follow a period, are left alone.
-    - Roman numerals are never converted to Arabic numbers.
-    """
-    if not line:
-        return line
-
-    markers = [
-        m for m in _ROMAN_LIST_MARKER_RE.finditer(line)
-        if _is_roman_numeral(m.group(1))
-    ]
-    # A list needs at least two markers, one of which ends the previous item.
-    if len(markers) < 2:
-        return line
-    if not any(line[m.start() - 2:m.start()] == ". " for m in markers):
-        return line
-
-    # Insert a line break before each marker that follows a period+whitespace.
-    # Iterate right-to-left so earlier positions are not shifted.
-    result = line
-    for m in reversed(markers):
-        start = m.start()
-        if result[start - 2:start] == ". ":
-            # Drop the space and put a newline in its place so no trailing
-            # space is left before the line break.
-            result = result[:start - 1] + "\n" + result[start:]
-    return result
-
-
 def _capitalize(value: str) -> str:
     """Return *value* with its first alphabetic character uppercased.
 
@@ -388,10 +327,8 @@ def _fix_numbered_lists(text: str) -> str:
             # Never touch code content.
             out.append(line)
             continue
-        # Non-code line: fix Arabic broken markers first, then conservatively
-        # restore lost line breaks before any malformed inline Roman markers.
-        result = _BROKEN_LIST_RE.sub(lambda m: "\n" + m.group(1), line)
-        out.append(_fix_broken_roman_lists(result))
+        # Non-code line: insert a line break before an obvious broken marker.
+        out.append(_BROKEN_LIST_RE.sub(lambda m: "\n" + m.group(1), line))
 
     return "\n".join(out)
 
