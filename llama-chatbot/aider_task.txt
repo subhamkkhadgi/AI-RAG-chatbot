@@ -1,0 +1,44 @@
+Execute this task directly. Do not just describe what you would do.
+
+Fix ONE small prompt-formatting issue.
+
+ONLY modify:
+src/services/chat_service.py
+
+Find _RAG_CONTEXT_TEMPLATE and modify ONLY the formatting instruction.
+
+Problem: Ollama sometimes generates malformed lists such as:
+- Role-Based Authentication... responsibilities- Survey Creation...
+- User Authentication:- Booking:- Administrative Features:
+- Python* HTML, CSS, JavaScript, React* MySQL
+
+The malformed formatting originates from model generation. Do NOT add a response_formatter.py heuristic.
+
+Change the instruction so the model is explicitly told:
+- preserve the factual information from retrieved context
+- do not copy malformed formatting from retrieved documents
+- every list item must be on its own separate line
+- use standard Markdown "- item" bullets
+- never concatenate list items
+- never use "*" as a list-item separator
+
+Make the smallest possible wording change. Do not rewrite the surrounding prompt.
+
+DO NOT modify response_formatter.py, retrieval, RAG logic, reranker, Qdrant, embeddings, providers, citations, UI, config, .env, dependencies, or unrelated files.
+
+Do not inspect git history.
+Do not create diagnostic files.
+Do not add formatter heuristics.
+Do not refactor anything.
+
+After editing, run:
+python -m pytest tests/services/test_chat_service.py -v
+
+If a test fails ONLY because it expects the old literal prompt wording, update only that assertion.
+
+Then run:
+python -m pytest -v
+
+Report the exact files changed and both test results.
+
+Do not ask me to approve the edit unless Aider requires confirmation for the actual file change. Start by reading only src/services/chat_service.py, identify _RAG_CONTEXT_TEMPLATE, make the minimal edit, and proceed to testing.
