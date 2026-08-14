@@ -315,3 +315,178 @@ class TestProperties:
         """The ``context_builder`` property should return the injected instance."""
         assert rag_service.context_builder is mock_context_builder
 
+
+# ---------------------------------------------------------------------------
+# Reranker integration (Sprint: page-diverse reranker, feature-flagged)
+# ---------------------------------------------------------------------------
+class _ReversingReranker:
+    """Deterministic fake reranker that reverses candidate order."""
+
+    def __init__(self) -> None:
+        self.last_query: str | None = None
+
+    def rank(self, query: str, candidates):
+        """Return candidates in reversed (deterministic) order."""
+        self.last_query = query
+        return list(reversed(candidates))
+
+
+def _page_chunk(
+    chunk_id: str, filename: str, page_number: int, score: float
+) -> RetrievedChunk:
+    """Build a chunk with explicit page metadata."""
+    return RetrievedChunk(
+        chunk_id=chunk_id,
+        document_id=f"doc-{filename}",
+        filename=filename,
+        chunk_index=0,
+        text=f"Content of {chunk_id}.",
+        score=score,
+        page_number=page_number,
+        created_at=None,
+    )
+
+
+class TestRerankerRAGIntegration:
+    def test_reranker_uses_candidate_pool_limit(
+        self,
+        mock_context_builder: MagicMock,
+    ) -> None:
+        """With a reranker, the retriever is called with the candidate limit."""
+        mock_retriever = create_autospec(DocumentRetriever, instance=True)
+        mock_retriever.default_limit = 10
+        chunks = [
+            _page_chunk("c1", "a.pdf", 1, 0.9),
+            _page_chunk("c2", "a.pdf", 1, 0.8),
+            _page_chunk("c3", "b.pdf", 2, 0.7),
+        ]
+        mock_retriever.retrieve.return_value = _make_retrieval_result(
+            chunks=chunks, query="test query"
+        )
+
+        reranker = _ReversingReranker()
+        rag_service = RAGService(
+            retriever=mock_retriever,
+            context_builder=mock_context_builder,
+            reranker=reranker,
+            candidate_limit=10,
+            final_limit=3,
+        )
+
+        result = rag_service.query("test query")
+
+        mock_retriever.retrieve.assert_called_once_with(
+            "test query", limit=10
+        )
+        assert reranker.last_query == "test query"
+        # Reversed order, then page-diverse top-3 (all distinct pages kept).
+        assert [c.chunk_id for c in result.retrieval_result.chunks] == [
+            "c3",
+            "c2",
+            "c1",
+        ]
+
+    def test_reranker_reduces_to_final_limit(
+        self,
+        mock_context_builder: MagicMock,
+    ) -> None:
+        """Rerank + page-diverse selection caps the result at final_limit."""
+        mock_retriever = create_autospec(DocumentRetriever, instance=True)
+        mock_retriever.default_limit = 10
+        chunks = [
+            _page_chunk("c1", "a.pdf", 1, 0.9),
+            _page_chunk("c2", "a.pdf", 2, 0.8),
+            _page_chunk("c3", "a.pdf", 3, 0.7),
+            _page_chunk("c4", "a.pdf", 4, 0.6),
+        ]
+        mock_retriever.retrieve.return_value = _make_retrieval_result(
+            chunks=chunks, query="q"
+        )
+
+        rag_service = RAGService(
+            retriever=mock_retriever,
+            context_builder=mock_context_builder,
+            reranker=_ReversingReranker(),
+            candidate_limit=10,
+            final_limit=3,
+        )
+
+        result = rag_service.query("q")
+
+        assert result.retrieval_result.total_results == 3
+        assert result.retrieval_result.total_results == len(
+            result.retrieval_result.chunks
+        )
+
+    def test_reranker_disabled_preserves_default_limit(
+        self, rag_service: RAGService, mock_retriever: MagicMock
+    ) -> None:
+        """With no reranker, retrieval uses the existing default limit (None)."""
+        rag_service.query("test query")
+        mock_retriever.retrieve.assert_called_once_with(
+            "test query", limit=None
+        )
+        assert rag_service.reranker is None
+        assert rag_service.candidate_limit is None
+        assert rag_service.final_limit == 3
+
+    def test_reranker_failure_wraps_in_chatbot_error(
+        self,
+        mock_retriever: MagicMock,
+        mock_context_builder: MagicMock,
+    ) -> None:
+        """A reranker failure is wrapped in a ChatbotError (safe fallback)."""
+        chunks = [_page_chunk("c1", "a.pdf", 1, 0.9)]
+        mock_retriever.retrieve.return_value = _make_retrieval_result(
+            chunks=chunks, query="q"
+        )
+
+        class _BrokenReranker:
+            def rank(self, _query, _candidates):  # noqa: ARG002
+                raise RuntimeError("model exploded")
+
+        rag_service = RAGService(
+            retriever=mock_retriever,
+            context_builder=mock_context_builder,
+            reranker=_BrokenReranker(),
+            candidate_limit=10,
+        )
+
+        with pytest.raises(ChatbotError, match="reranking"):
+            rag_service.query("q")
+
+    def test_invalid_reranker_limits_raise(self) -> None:
+        """Invalid candidate/final limits are rejected at construction."""
+        mock_retriever = MagicMock(spec=DocumentRetriever)
+        mock_builder = MagicMock(spec=ContextBuilder)
+        with pytest.raises(ValueError, match="final_limit"):
+            RAGService(
+                retriever=mock_retriever,
+                context_builder=mock_builder,
+                final_limit=0,
+            )
+        with pytest.raises(ValueError, match="candidate_limit"):
+            RAGService(
+                retriever=mock_retriever,
+                context_builder=mock_builder,
+                candidate_limit=0,
+            )
+
+    def test_reranker_properties(self) -> None:
+        """Expose reranker, candidate_limit, and final_limit via properties."""
+        mock_retriever = MagicMock(spec=DocumentRetriever)
+        mock_builder = MagicMock(spec=ContextBuilder)
+        reranker = _ReversingReranker()
+        service = RAGService(
+            retriever=mock_retriever,
+            context_builder=mock_builder,
+            reranker=reranker,
+            candidate_limit=12,
+            final_limit=4,
+        )
+        assert service.reranker is reranker
+        assert service.candidate_limit == 12
+        assert service.final_limit == 4
+
+
+

@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from src.exceptions import ChatbotError, ConfigurationError
 from src.rag.context_builder import ContextBuilder
 from src.retrieval.models import RetrievalResult
+from src.retrieval.reranker import ChunkReranker, select_page_diverse
 from src.retrieval.retriever import DocumentRetriever
 
 logger = logging.getLogger(__name__)
@@ -64,12 +65,28 @@ class RAGService:
     context_builder:
         A ``ContextBuilder`` instance that formats retrieved chunks
         into an LLM-ready context string.
+    reranker:
+        An optional ``ChunkReranker``.  When ``None`` (default), the
+        existing retrieval pipeline runs unchanged.  When provided, the
+        candidate pool is retrieved (``candidate_limit``), re-ranked by
+        the reranker, and page-diverse selected down to ``final_limit``
+        chunks before the context is built.
+    candidate_limit:
+        Size of the candidate pool fetched from the vector store when a
+        reranker is active.  ``None`` falls back to the retriever's
+        ``default_limit``.
+    final_limit:
+        Number of chunks kept after reranking + page-diverse selection.
     """
 
     def __init__(
         self,
         retriever: DocumentRetriever,
         context_builder: ContextBuilder,
+        *,
+        reranker: ChunkReranker | None = None,
+        candidate_limit: int | None = None,
+        final_limit: int = 3,
     ) -> None:
         if not isinstance(retriever, DocumentRetriever):
             raise TypeError(
@@ -79,8 +96,19 @@ class RAGService:
             raise TypeError(
                 f"Expected a ContextBuilder instance, got {type(context_builder).__name__}"
             )
+        if final_limit < 1:
+            raise ValueError(
+                f"final_limit must be a positive integer, got {final_limit}"
+            )
+        if candidate_limit is not None and candidate_limit < 1:
+            raise ValueError(
+                f"candidate_limit must be a positive integer, got {candidate_limit}"
+            )
         self._retriever: DocumentRetriever = retriever
         self._context_builder: ContextBuilder = context_builder
+        self._reranker: ChunkReranker | None = reranker
+        self._candidate_limit: int | None = candidate_limit
+        self._final_limit: int = final_limit
 
     # ------------------------------------------------------------------
     # Properties
@@ -94,6 +122,21 @@ class RAGService:
     def context_builder(self) -> ContextBuilder:
         """The configured ``ContextBuilder`` instance."""
         return self._context_builder
+
+    @property
+    def reranker(self) -> ChunkReranker | None:
+        """The optional ``ChunkReranker``, or ``None`` when disabled."""
+        return self._reranker
+
+    @property
+    def candidate_limit(self) -> int | None:
+        """The candidate pool size used when a reranker is active."""
+        return self._candidate_limit
+
+    @property
+    def final_limit(self) -> int:
+        """The number of chunks kept after reranking + page-diverse selection."""
+        return self._final_limit
 
     # ------------------------------------------------------------------
     # Public API
@@ -113,7 +156,11 @@ class RAGService:
             The user's search query.
         limit:
             Maximum number of chunks to retrieve. Falls back to the
-            retriever's ``default_limit`` if ``None``.
+            retriever's ``default_limit`` if ``None``.  When a reranker
+            is configured, the configured ``candidate_limit`` pool
+            governs retrieval instead (the reranker needs the full
+            candidate pool), and the *context* is selected down to
+            ``final_limit`` chunks.
 
         Returns
         -------
@@ -126,7 +173,8 @@ class RAGService:
         ConfigurationError
             If the query is empty or whitespace-only.
         ChatbotError
-            If the context builder fails to format the result.
+            If the context builder fails to format the result, or the
+            reranker/selection stage fails.
         """
         # 1. Validate input (let DocumentRetriever raise ConfigurationError)
         #    We do a basic check here to fail fast; DocumentRetriever also validates.
@@ -137,13 +185,24 @@ class RAGService:
                 safe_message="Please enter a query before searching documents.",
             )
 
-        # 2. Retrieve relevant chunks
+        # 2. Determine the retrieval limit.  With an active reranker we
+        #    fetch the wider candidate pool so reranking sees enough
+        #    cross-page/cross-document alternatives.
+        effective_limit = limit
+        if self._reranker is not None:
+            effective_limit = (
+                self._candidate_limit
+                if self._candidate_limit is not None
+                else effective_limit
+            )
+
+        # 3. Retrieve relevant chunks
         logger.info(
-            "RAG query (length=%d, limit=%s)", len(stripped), str(limit)
+            "RAG query (length=%d, limit=%s)", len(stripped), str(effective_limit)
         )
         try:
             retrieval_result: RetrievalResult = self._retriever.retrieve(
-                stripped, limit=limit
+                stripped, limit=effective_limit
             )
         except (ConfigurationError, ChatbotError):
             raise
@@ -156,7 +215,34 @@ class RAGService:
                 safe_message="Failed to search documents. Please try again.",
             ) from exc
 
-        # 3. Build formatted context
+        # 4. Optional reranker + page-diverse selection stage.  Only
+        #    operates on the in-memory retrieved chunks (no Qdrant writes,
+        #    no stored data changes).  Skipped entirely when no reranker
+        #    is configured, preserving the exact existing behaviour.
+        if self._reranker is not None and retrieval_result.chunks:
+            try:
+                reranked = self._reranker.rank(stripped, retrieval_result.chunks)
+                selected = select_page_diverse(reranked, self._final_limit)
+            except ChatbotError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "Unexpected error during reranking/selection: %s",
+                    exc,
+                    exc_info=True,
+                )
+                raise ChatbotError(
+                    "An unexpected error occurred during document reranking.",
+                    safe_message="Failed to refine document search. Please try again.",
+                ) from exc
+
+            retrieval_result = RetrievalResult(
+                query=stripped,
+                chunks=selected,
+                total_results=len(selected),
+            )
+
+        # 5. Build formatted context
         try:
             context: str = self._context_builder.build(retrieval_result)
         except Exception as exc:
@@ -168,7 +254,7 @@ class RAGService:
                 safe_message="Failed to prepare document context. Please try again.",
             ) from exc
 
-        # 4. Return result
+        # 6. Return result
         return RAGResult(
             query=stripped,
             retrieval_result=retrieval_result,
@@ -182,6 +268,9 @@ class RAGService:
         return (
             f"{self.__class__.__name__}("
             f"retriever={self._retriever!r}, "
-            f"context_builder={self._context_builder!r})"
+            f"context_builder={self._context_builder!r}, "
+            f"reranker={self._reranker!r}, "
+            f"candidate_limit={self._candidate_limit!r}, "
+            f"final_limit={self._final_limit!r})"
         )
 

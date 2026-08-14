@@ -23,6 +23,7 @@ from src.models.chat import Conversation, SourceRef
 from src.providers.factory import create_provider
 from src.rag.context_builder import ContextBuilder
 from src.rag.rag_service import RAGService
+from src.retrieval.reranker import MiniLMReranker
 from src.retrieval.retriever import DocumentRetriever
 from src.services.chat_service import ChatService
 from src.vectorstores.factory import create_vector_store
@@ -126,7 +127,8 @@ def _render_sources(sources: list[SourceRef]) -> None:
     Internal metadata (``document_id``, ``chunk_index``, Qdrant point
     IDs, similarity scores) is intentionally **not** shown to the user.
     """
-    label = f"📚 {len(sources)} Sources"
+    count = len(sources)
+    label = f"📚 {count} Source{'s' if count != 1 else ''}"
     with st.expander(label):
         for i, src in enumerate(sources, start=1):
             st.markdown(f"**{i}. {src.filename}**")
@@ -158,14 +160,39 @@ def _build_chat_service() -> ChatService:
             settings.embedding_provider, settings
         )
         vector_store = create_vector_store("qdrant", settings)
-        retriever = DocumentRetriever(
-            embedding_provider=embedding_provider,
-            vector_store=vector_store,
-        )
+
+        # Reranker feature (feature-flagged, default OFF).  When enabled we
+        # relax the retriever so it produces a genuine cross-document
+        # candidate pool (max_documents unlimited, default_limit =
+        # reranker_candidate_limit) — the only deviation from the standard
+        # production retrieval, matching the validated experiment.  The
+        # retriever is constructed with ``min_score=None`` so it still
+        # resolves to the production ``retrieval_min_score``.
+        if settings.reranker_enabled:
+            retriever = DocumentRetriever(
+                embedding_provider=embedding_provider,
+                vector_store=vector_store,
+                default_limit=settings.reranker_candidate_limit,
+                min_score=None,
+                max_documents=0,
+            )
+            reranker = MiniLMReranker(model_name=settings.reranker_model)
+        else:
+            retriever = DocumentRetriever(
+                embedding_provider=embedding_provider,
+                vector_store=vector_store,
+            )
+            reranker = None
+
         context_builder = ContextBuilder()
         rag_service = RAGService(
             retriever=retriever,
             context_builder=context_builder,
+            reranker=reranker,
+            candidate_limit=(
+                settings.reranker_candidate_limit if reranker is not None else None
+            ),
+            final_limit=settings.reranker_final_limit,
         )
     except ChatbotError:
         logger.warning("Failed to create RAGService, continuing without RAG")

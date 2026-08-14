@@ -82,6 +82,25 @@ class Settings(BaseSettings):
     #: (with no citations).
     retrieval_confidence_threshold: float = 0.6
 
+    # ── Cross-encoder reranking (feature-flagged, default OFF) ─────────
+    #: Whether to rerank the retrieved candidate pool with a MiniLM
+    #: cross-encoder and select a final, page-diverse context set.
+    #: ``False`` (default) preserves the exact existing retrieval behaviour.
+    #: When ``True``, the pipeline becomes
+    #: ``Qdrant Top-N -> reranker -> greedy page-diverse Top-M -> context``
+    #: and the retriever is relaxed to produce a genuine cross-document
+    #: candidate pool (``max_documents`` unlimited, ``default_limit`` =
+    #: ``reranker_candidate_limit``).
+    reranker_enabled: bool = False
+    #: Hugging Face cross-encoder model identifier used for reranking.
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    #: Size of the candidate pool retrieved from the vector store before
+    #: reranking (the Qdrant "Top-N").
+    reranker_candidate_limit: int = 10
+    #: Number of chunks kept after reranking + page-diverse selection
+    #: (the final context set size).
+    reranker_final_limit: int = 3
+
     # ── Qdrant (optional — validated when selected) ───────────────────
     qdrant_host: str = "localhost"
     qdrant_port: int = 6333
@@ -197,6 +216,29 @@ class Settings(BaseSettings):
         if v < 1:
             raise ValueError(
                 f"REQUEST_TIMEOUT must be a positive integer (seconds), got {v}"
+            )
+        return v
+
+    @field_validator("reranker_model")
+    @classmethod
+    def _strip_reranker_model(cls, v: str) -> str:
+        return v.strip()
+
+    @field_validator("reranker_candidate_limit")
+    @classmethod
+    def _validate_reranker_candidate_limit(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(
+                f"RERANKER_CANDIDATE_LIMIT must be a positive integer, got {v}"
+            )
+        return v
+
+    @field_validator("reranker_final_limit")
+    @classmethod
+    def _validate_reranker_final_limit(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(
+                f"RERANKER_FINAL_LIMIT must be a positive integer, got {v}"
             )
         return v
 

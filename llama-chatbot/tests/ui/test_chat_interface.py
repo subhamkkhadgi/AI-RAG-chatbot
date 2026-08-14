@@ -190,7 +190,8 @@ class TestSourceRendering:
         expander_mock.assert_called_once()
         label = expander_mock.call_args[0][0]
         assert "📚" in label
-        assert "1 Sources" in label
+        assert "1 Source" in label
+        assert "Sources" not in label
 
         # The context manager should be entered.
         expander_ctx.__enter__.assert_called_once()
@@ -259,6 +260,43 @@ class TestSourceRendering:
 
         # Divider between two sources.
         assert divider_mock.call_count >= 1
+
+    def test_multiple_sources_plural_label(
+        self, mock_session_state: MagicMock
+    ) -> None:
+        """The Sources label uses the plural form for more than one source."""
+        _init_state(mock_session_state)
+        conv: Conversation = mock_session_state._storage[CONVERSATION_KEY]
+        conv.add_assistant_message(
+            "Answer.",
+            sources=[
+                SourceRef(filename="a.pdf", page_number=1, text="A."),
+                SourceRef(filename="b.pdf", page_number=2, text="B."),
+            ],
+        )
+
+        expander_mock = MagicMock()
+        expander_ctx = MagicMock()
+        expander_mock.return_value = expander_ctx
+        markdown_mock = MagicMock()
+        caption_mock = MagicMock()
+
+        with (
+            patch("streamlit.session_state", mock_session_state),
+            patch("streamlit.chat_message"),
+            patch("streamlit.chat_input", return_value=None),
+            patch("streamlit.empty"),
+            patch("streamlit.rerun"),
+            patch("streamlit.error"),
+            patch("streamlit.expander", expander_mock),
+            patch("streamlit.markdown", markdown_mock),
+            patch("streamlit.caption", caption_mock),
+        ):
+            render_chat_interface()
+
+        expander_mock.assert_called_once()
+        label = expander_mock.call_args[0][0]
+        assert "2 Sources" in label
 
     def test_internal_metadata_not_rendered(
         self, mock_session_state: MagicMock

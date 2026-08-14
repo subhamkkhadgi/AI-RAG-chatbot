@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: Template for prepending RAG context to the user message.
-_RAG_CONTEXT_TEMPLATE: str = "<retrieved_context>\nThe following is reference material from documents.\nUse only the factual information.\nDo not copy the document's formatting, numbering style, headings, or list markers.\nCreate the answer using the required answer format.\n\n{context}\n</retrieved_context>\n\nQuestion:\n{query}"
+_RAG_CONTEXT_TEMPLATE: str = "<retrieved_context>\nThe following is reference material from documents.\nUse only the factual information.\nDo not copy the document's formatting, numbering style, headings, or list markers — especially malformed list symbols like *.\nWrite any list with each item on its own separate line using normal Markdown bullets `- `, for example \"- item\". Never join list items with \"*\" or other symbols. Preserve the actual information from the retrieved context.\n\n{context}\n</retrieved_context>\n\nQuestion:\n{query}"
 
 
 #: Generic words that carry little topical signal.  A question containing

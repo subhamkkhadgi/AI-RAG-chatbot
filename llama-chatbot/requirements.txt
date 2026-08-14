@@ -27,6 +27,13 @@ python-dotenv>=1.0.0,<2.0.0
 pydantic>=2.0.0,<3.0.0
 pydantic-settings>=2.0.0,<3.0.0
 
+# ── Optional: cross-encoder reranking (feature-flagged, default OFF) ────────
+# Only required when RERANKER_ENABLED=true.  The reranker is imported lazily,
+# so the base application runs without these packages.  Install via:
+#   pip install "sentence-transformers>=2.7,<4.0"
+# (pulls in torch / transformers automatically)
+# sentence-transformers>=2.7,<4.0
+
 # ── Development ──────────────────────────────────────────────────────────────
 
 # Testing framework
