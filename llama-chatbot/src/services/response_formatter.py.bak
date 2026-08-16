@@ -333,83 +333,13 @@ def _fix_numbered_lists(text: str) -> str:
     return "\n".join(out)
 
 
-
-def _normalize_malformed_lists(text: str) -> str:
-    """Normalize clearly malformed concatenated list structures into proper Markdown bullets.
-
-    Recognizes repeated malformed list-item structures where list markers
-    (``-``, ``*``, or ``•``) are directly concatenated to word text without
-    proper separation, and inserts line breaks to create normal list items.
-
-    This is a conservative, deterministic post-processing step that only affects
-    clearly malformed patterns and leaves legitimate hyphenated words, emphasis,
-    and other formatting untouched.
-
-    The function processes text line-by-line and preserves fenced code blocks.
-
-    Parameters
-    ----------
-    text :
-        The answer text to normalise.
-
-    Returns
-    -------
-    str
-        The text with malformed concatenated list structures normalised.
-    """
-    if not text:
-        return text
-
-    lines = text.split("\n")
-    out: list[str] = []
-    in_code: bool = False
-
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("```"):
-            in_code = not in_code
-            out.append(line)
-            continue
-        if in_code:
-            # Never touch code content.
-            out.append(line)
-            continue
-
-        # Handle lines that start with a bullet marker directly followed by a word.
-        # E.g., "• Python• HTML• CSS" should become "- Python\n- HTML\n- CSS".
-        # We detect this by checking if the stripped line starts with a marker
-        # character followed immediately by a word character.
-        _leading_re = re.compile(r"^([-*•])(\w+)")
-        leading_match = _leading_re.match(stripped)
-        if leading_match:
-            # Replace the leading marker with '-' and a newline, keep the word
-            line = "-" + leading_match.group(2) + "\n" + stripped[len(leading_match.group(0)):]
-
-        # Normalise malformed concatenated list markers on this non-code line.
-        # Pattern: word + marker(-/*/•) + space + word
-        # This catches cases like: "Python- HTML- CSS" or "• Python• HTML• CSS"
-        # but NOT cases like "Python-3", "AI-powered", or "*italic text*".
-        # We iterate until no more changes (convergence) to handle multiple markers.
-        _list_re = re.compile(r"(\w+)([-*•])(\s+\w+)")
-        prev = line
-        while True:
-            normalized = _list_re.sub(lambda m: m.group(1) + "\n-" + m.group(3), prev)
-            if normalized == prev:
-                break
-            prev = normalized
-        out.append(prev)
-
-    return "\n".join(out)
-
 def normalize_markdown(text: str) -> str:
     """Conservatively normalise obvious markdown inconsistencies.
 
-    Three formatting-only fixes are applied, in order:
+    Two formatting-only fixes are applied, in order:
     1. An unclosed triple-backtick code fence is closed (``_close_unclosed_fence``).
     2. Obvious broken numbered-list line breaks are restored
        (``_fix_numbered_lists``).
-    3. Clearly malformed concatenated list structures are normalised
-       (``_normalize_malformed_lists``).
 
     Both fixes never modify content, never rewrite sentences, never change
     code or language tags, and are skipped whenever the text is ambiguous
@@ -427,4 +357,4 @@ def normalize_markdown(text: str) -> str:
     """
     if not text:
         return text
-    return _normalize_malformed_lists(_fix_numbered_lists(_close_unclosed_fence(text)))
+    return _fix_numbered_lists(_close_unclosed_fence(text))

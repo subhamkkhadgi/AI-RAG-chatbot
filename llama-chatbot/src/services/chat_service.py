@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: Template for prepending RAG context to the user message.
-_RAG_CONTEXT_TEMPLATE: str = "<retrieved_context>\nThe following is reference material from documents.\nUse only the factual information.\nDo not copy the document's formatting, numbering style, headings, or list markers — especially malformed list symbols like *.\nWrite any list with each item on its own separate line using normal Markdown bullets `- `, for example \"- item\". Never join list items with \"*\" or other symbols. Preserve the actual information from the retrieved context.\n\n{context}\n</retrieved_context>\n\nQuestion:\n{query}"
+_RAG_CONTEXT_TEMPLATE: str = "<retrieved_context>\nThe following is reference material from documents.\nPreserve the factual information from the retrieved context but do NOT copy malformed formatting from the documents.\n\nFor lists, output each item on a separate line exactly like:\n- First item\n- Second item\n- Third item\n\nNever put two list items on the same line. Never use * or \\* between items.\n- Separate distinct paragraphs with a blank line.\n- If a paragraph is followed by a list, start the list on a new line after the paragraph.\n- Never concatenate the end of a sentence or paragraph directly with the next bullet.\n- Preserve meaningful paragraph and line breaks.\n\n{context}\n</retrieved_context>\n\nQuestion:\n{query}"
 
 
 #: Generic words that carry little topical signal.  A question containing

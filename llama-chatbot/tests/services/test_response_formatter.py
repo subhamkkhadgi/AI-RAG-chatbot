@@ -448,3 +448,23 @@ class TestMarkdownConsistency:
         """Broken-looking markers inside code are never modified."""
         text = "```\nFeature one2. Feature two\n```"
         assert strip_attribution(text) == text
+
+    def test_malformed_concatenated_dash_lists(self) -> None:
+        """Concatenated - bullets are normalised to separate list items."""
+        text = "- Python- HTML- CSS"
+        assert strip_attribution(text) == "- Python\n- HTML\n- CSS"
+
+    def test_malformed_concatenated_asterisk_lists(self) -> None:
+        """Concatenated * separators are normalised to separate list items."""
+        text = "- Python* HTML* CSS"
+        assert strip_attribution(text) == "- Python\n- HTML\n- CSS"
+
+    def test_malformed_concatenated_unicode_bullets(self) -> None:
+        """Concatenated • bullets are normalised to separate list items with '-'."""
+        text = "• Python• HTML• CSS"
+        assert strip_attribution(text) == "- Python\n- HTML\n- CSS"
+
+"""
+Additional regression tests for _normalize_malformed_lists have been added
+above. The original TestAttributionRemoval class begins at line 13 of this file.
+"""

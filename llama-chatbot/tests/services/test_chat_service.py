@@ -508,8 +508,8 @@ class TestRAGSendMessage:
         assert "test query" in user_msg.content
         # The RAG context must explicitly instruct proper Markdown lists so
         # the model emits one bullet per line instead of "*"-joined items.
-        assert "each item on its own line" in user_msg.content
-        assert "Never join list items" in user_msg.content
+        assert "For lists, output each item on a separate line exactly like" in user_msg.content
+        assert "Never put two list items on the same line" in user_msg.content
 
     def test_rag_not_used_when_not_provided(self) -> None:
         """Without RAGService, the user message should remain unchanged."""
