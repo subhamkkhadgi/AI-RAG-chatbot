@@ -234,6 +234,20 @@ def normalize_whitespace(text: str) -> str:
 #: space or digit precedes the number) is never treated as a list break.
 _BROKEN_LIST_RE: Final[Pattern[str]] = re.compile(r"(?<=[A-Za-z])(\d+\.\s)")
 
+#: Matches a list line starting with a valid bullet marker:
+#: '-', '*', '+' (must be followed by whitespace), or '•' (unicode bullet).
+_LIST_LINE_RE: Final[Pattern[str]] = re.compile(
+    r"^(\s*)(?:([-*+])\s+(.*)|(\u2022)\s*(.*))$"
+)
+
+#: Matches inner list separators within an eligible bullet line:
+#: 1. Escaped asterisk: \* followed by whitespace
+#: 2. Hyphen / asterisk / unicode bullet followed by whitespace
+#: 3. Unicode bullet abutting preceding text
+_MALFORMED_SEP_RE: Final[Pattern[str]] = re.compile(
+    r"(?<=\S)(?:\\\*|(?<!\*)[-*•](?!\*))\s+|(?<=\S)\u2022\s*"
+)
+
 
 def _capitalize(value: str) -> str:
     """Return *value* with its first alphabetic character uppercased.
@@ -334,18 +348,65 @@ def _fix_numbered_lists(text: str) -> str:
 
 
 
+def _split_malformed_items(content: str) -> list[str]:
+    """Split concatenated list content into individual item strings.
+
+    Protects inline code, bold spans, and italic spans from being falsely
+    treated as list-item separators.
+    """
+    if not content:
+        return []
+
+    protected_spans: list[tuple[int, int]] = []
+
+    # Inline code: `code`
+    for m in re.finditer(r"`[^`\n]+`", content):
+        protected_spans.append((m.start(), m.end()))
+
+    # Bold: **bold**
+    for m in re.finditer(r"\*\*(?:[^*]|\n)+?\*\*", content):
+        protected_spans.append((m.start(), m.end()))
+
+    # Italic: *italic* (where opening * is preceded by start/space and followed by non-space)
+    for m in re.finditer(r"(?<!\S)\*(?!\s)(?:[^*]|\n)+?(?<=\S)\*(?!\*)", content):
+        protected_spans.append((m.start(), m.end()))
+
+    split_ranges: list[tuple[int, int]] = []
+    for m in _MALFORMED_SEP_RE.finditer(content):
+        start, end = m.start(), m.end()
+        if any(s <= start < e for s, e in protected_spans):
+            continue
+        split_ranges.append((start, end))
+
+    if not split_ranges:
+        return [content]
+
+    items: list[str] = []
+    prev_end = 0
+    for sep_start, sep_end in split_ranges:
+        item = content[prev_end:sep_start].strip()
+        if item:
+            items.append(item)
+        prev_end = sep_end
+    last_item = content[prev_end:].strip()
+    if last_item:
+        items.append(last_item)
+
+    return items
+
+
 def _normalize_malformed_lists(text: str) -> str:
     """Normalize clearly malformed concatenated list structures into proper Markdown bullets.
 
-    Recognizes repeated malformed list-item structures where list markers
-    (``-``, ``*``, or ``•``) are directly concatenated to word text without
-    proper separation, and inserts line breaks to create normal list items.
+    Recognizes malformed bullet lines where multiple list items were concatenated
+    without proper newlines (e.g. ``- Item 1- Item 2``, ``- Item 1* Item 2``,
+    ``- Item 1\\* Item 2``, or ``• Item 1• Item 2``), and splits them into
+    individual Markdown list items on separate lines.
 
-    This is a conservative, deterministic post-processing step that only affects
-    clearly malformed patterns and leaves legitimate hyphenated words, emphasis,
-    and other formatting untouched.
-
-    The function processes text line-by-line and preserves fenced code blocks.
+    This is a conservative, deterministic post-processing step that processes
+    text line-by-line, preserves fenced code blocks, and leaves legitimate
+    hyphenated words (``Python-3``, ``AI-powered``), emphasis, inline code,
+    and citations untouched.
 
     Parameters
     ----------
@@ -375,29 +436,22 @@ def _normalize_malformed_lists(text: str) -> str:
             out.append(line)
             continue
 
-        # Handle lines that start with a bullet marker directly followed by a word.
-        # E.g., "• Python• HTML• CSS" should become "- Python\n- HTML\n- CSS".
-        # We detect this by checking if the stripped line starts with a marker
-        # character followed immediately by a word character.
-        _leading_re = re.compile(r"^([-*•])(\w+)")
-        leading_match = _leading_re.match(stripped)
-        if leading_match:
-            # Replace the leading marker with '-' and a newline, keep the word
-            line = "-" + leading_match.group(2) + "\n" + stripped[len(leading_match.group(0)):]
+        match = _LIST_LINE_RE.match(line)
+        if not match:
+            # Not an eligible list line (Step 1). Preserve unchanged.
+            out.append(line)
+            continue
 
-        # Normalise malformed concatenated list markers on this non-code line.
-        # Pattern: word + marker(-/*/•) + space + word
-        # This catches cases like: "Python- HTML- CSS" or "• Python• HTML• CSS"
-        # but NOT cases like "Python-3", "AI-powered", or "*italic text*".
-        # We iterate until no more changes (convergence) to handle multiple markers.
-        _list_re = re.compile(r"(\w+)([-*•])(\s+\w+)")
-        prev = line
-        while True:
-            normalized = _list_re.sub(lambda m: m.group(1) + "\n-" + m.group(3), prev)
-            if normalized == prev:
-                break
-            prev = normalized
-        out.append(prev)
+        indent = match.group(1)
+        marker = match.group(2) or match.group(4)
+        content = match.group(3) if match.group(3) is not None else match.group(5)
+
+        items = _split_malformed_items(content)
+        if len(items) > 1 or marker == "•":
+            for item in items:
+                out.append(f"{indent}- {item}")
+        else:
+            out.append(line)
 
     return "\n".join(out)
 
